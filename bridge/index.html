@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sync Drive OAuth Bridge</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding-top: 50px; }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>Sync Drive Authentication</h1>
+    <div id="status">Processing...</div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const code = urlParams.get('code');
+        const error = urlParams.get('error');
+        const statusEl = document.getElementById('status');
+
+        if (code) {
+            const obsidianUrl = `obsidian://sync-drive?code=${encodeURIComponent(code)}`;
+            statusEl.innerHTML = '<p class="success">Authentication successful!</p><p>Redirecting back to Obsidian...</p><p>If nothing happens, <a href="' + obsidianUrl + '">click here</a>.</p>';
+            window.location.href = obsidianUrl;
+        } else if (error) {
+            statusEl.innerHTML = '<p class="error">Authentication failed: ' + decodeURIComponent(error) + '</p>';
+        } else {
+            statusEl.innerHTML = '<p class="error">No authorization code found.</p>';
+        }
+    </script>
+</body>
+</html>
