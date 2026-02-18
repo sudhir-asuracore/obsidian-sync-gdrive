@@ -16,9 +16,9 @@ const pluginId = manifest.id;
 const distDir = path.resolve("dist", pluginId);
 
 // Get destination directory from environment variable
-const destDir = process.env.OBSIDIAN_PLUGIN_DEST;
+const destDirs = process.env.OBSIDIAN_PLUGIN_DEST ? process.env.OBSIDIAN_PLUGIN_DEST.split(",").map(d => d.trim()) : [];
 
-if (!destDir) {
+if (destDirs.length === 0) {
   console.error("Error: OBSIDIAN_PLUGIN_DEST is not defined in .env file.");
   process.exit(1);
 }
@@ -28,23 +28,24 @@ if (!fs.existsSync(distDir)) {
   process.exit(1);
 }
 
-// Ensure destination directory exists
-if (!fs.existsSync(destDir)) {
-    fs.mkdirSync(destDir, { recursive: true });
-}
-
-console.log(`Deploying to: ${destDir}`);
-
-try {
-  const files = fs.readdirSync(distDir);
-  for (const name of files) {
-    const src = path.join(distDir, name);
-    const dst = path.join(destDir, name);
-    fs.copyFileSync(src, dst);
-    console.log(`- Copied ${name}`);
+for (const destDir of destDirs) {
+  // Ensure destination directory exists
+  if (!fs.existsSync(destDir)) {
+      fs.mkdirSync(destDir, { recursive: true });
   }
-  console.log(`\nSuccessfully deployed "${pluginId}"`);
-} catch (err) {
-  console.error("Error copying files:", err);
-  process.exit(1);
+
+  console.log(`Deploying to: ${destDir}`);
+
+  try {
+    const files = fs.readdirSync(distDir);
+    for (const name of files) {
+      const src = path.join(distDir, name);
+      const dst = path.join(destDir, name);
+      fs.copyFileSync(src, dst);
+      console.log(`- Copied ${name}`);
+    }
+    console.log(`Successfully deployed "${pluginId}" to ${destDir}\n`);
+  } catch (err) {
+    console.error(`Error copying files to ${destDir}:`, err);
+  }
 }

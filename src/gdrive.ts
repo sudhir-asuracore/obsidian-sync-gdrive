@@ -12,6 +12,7 @@ export class GDriveHelper {
     private accessToken: string;
     private refreshToken: string;
     private debugEnabled = false;
+    private folderPathCache = new Map<string, string>();
 
     constructor(accessToken: string, refreshToken: string) {
         this.accessToken = accessToken;
@@ -113,15 +114,36 @@ export class GDriveHelper {
         return null;
     }
 
-    async createFolder(folderName: string): Promise<string> {
-        this.debugLog("Creating folder", folderName);
+    async getFolderIdInParent(parentId: string, folderName: string): Promise<string | null> {
+        const query = encodeURIComponent(`'${parentId}' in parents and name = '${folderName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+        try {
+            this.debugLog("Finding folder by name in parent", { folderName, parentId });
+            const data = await this.apiRequest({
+                url: `https://www.googleapis.com/drive/v3/files?q=${query}`,
+                method: 'GET'
+            });
+
+            if (data.files && data.files.length > 0) {
+                this.debugLog("Folder found in parent", data.files[0].id);
+                return data.files[0].id;
+            }
+        } catch (e) {
+            console.warn("Failed to get folder ID in parent:", e);
+        }
+        this.debugLog("Folder not found in parent");
+        return null;
+    }
+
+    async createFolder(folderName: string, parentId?: string): Promise<string> {
+        this.debugLog("Creating folder", { folderName, parentId });
         const data = await this.apiRequest({
             url: 'https://www.googleapis.com/drive/v3/files',
             method: 'POST',
             contentType: 'application/json',
             body: JSON.stringify({
                 name: folderName,
-                mimeType: 'application/vnd.google-apps.folder'
+                mimeType: 'application/vnd.google-apps.folder',
+                parents: parentId ? [parentId] : undefined
             })
         });
 
@@ -130,42 +152,123 @@ export class GDriveHelper {
     }
 
     async listFiles(folderId: string): Promise<any[]> {
-        const query = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
-        const data = await this.apiRequest({
-            url: `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id, name, mimeType, modifiedTime, md5Checksum, size, version, trashed, capabilities)`,
-            method: 'GET'
-        });
+        const files: any[] = [];
+        let pageToken: string | undefined;
+        const baseQuery = encodeURIComponent(`'${folderId}' in parents and trashed = false`);
+        do {
+            const tokenPart = pageToken ? `&pageToken=${pageToken}` : '';
+            const data = await this.apiRequest({
+                url: `https://www.googleapis.com/drive/v3/files?q=${baseQuery}&pageSize=1000${tokenPart}&fields=nextPageToken,files(id, name, mimeType, modifiedTime, md5Checksum, size, version, trashed, capabilities, parents)`,
+                method: 'GET'
+            });
 
-        this.debugLog("Listed files", { folderId, count: data.files?.length || 0 });
-        return data.files || [];
+            if (data.files && data.files.length > 0) {
+                files.push(...data.files);
+            }
+            pageToken = data.nextPageToken || undefined;
+        } while (pageToken);
+
+        this.debugLog("Listed files", { folderId, count: files.length });
+        return files;
+    }
+
+    async listFilesRecursive(rootFolderId: string): Promise<any[]> {
+        const results: any[] = [];
+        const queue: Array<{ id: string; path: string }> = [{ id: rootFolderId, path: '' }];
+
+        while (queue.length > 0) {
+            const current = queue.shift();
+            if (!current) break;
+            const children = await this.listFiles(current.id);
+            for (const child of children) {
+                if (child.mimeType === 'application/vnd.google-apps.folder') {
+                    const childPath = current.path ? `${current.path}${child.name}/` : `${child.name}/`;
+                    queue.push({ id: child.id, path: childPath });
+                } else {
+                    const filePath = current.path ? `${current.path}${child.name}` : child.name;
+                    results.push({ ...child, path: filePath, parentId: current.id });
+                }
+            }
+        }
+
+        this.debugLog("Listed files recursively", { rootFolderId, count: results.length });
+        return results;
     }
 
     async findFileByName(folderId: string, name: string): Promise<any | null> {
+        const files = await this.findFilesByName(folderId, name);
+        const file = files.length > 0 ? files[0] : null;
+        this.debugLog("Find file by name", { name, found: !!file });
+        return file;
+    }
+
+    async findFilesByName(folderId: string, name: string): Promise<any[]> {
         const query = encodeURIComponent(`'${folderId}' in parents and name = '${name}' and trashed = false`);
         const data = await this.apiRequest({
             url: `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id, name, mimeType, modifiedTime, md5Checksum, size, version, trashed)`,
             method: 'GET'
         });
 
-        const file = data.files && data.files.length > 0 ? data.files[0] : null;
-        this.debugLog("Find file by name", { name, found: !!file });
-        return file;
+        const files = data.files || [];
+        this.debugLog("Find files by name", { name, count: files.length });
+        return files;
     }
 
-    async getFileEtag(fileId: string): Promise<string | null> {
-        const response = await requestUrl({
-            url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id`,
-            method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${this.accessToken}`
-            },
-            throw: false
-        });
+    async ensureFolderPath(rootFolderId: string, folderPath: string): Promise<string> {
+        const normalized = folderPath.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+        if (!normalized) return rootFolderId;
 
-        const headers = (response as any).headers || {};
-        const etag = headers.etag || headers.ETag || null;
-        this.debugLog("Fetched file ETag", { fileId, hasEtag: !!etag });
-        return etag;
+        let currentId = rootFolderId;
+        let currentPath = '';
+        const parts = normalized.split('/').filter(Boolean);
+        for (const part of parts) {
+            currentPath = currentPath ? `${currentPath}/${part}` : part;
+            const cacheKey = `${rootFolderId}:${currentPath}`;
+            const cached = this.folderPathCache.get(cacheKey);
+            if (cached) {
+                currentId = cached;
+                continue;
+            }
+
+            let nextId = await this.getFolderIdInParent(currentId, part);
+            if (!nextId) {
+                nextId = await this.createFolder(part, currentId);
+            }
+            this.folderPathCache.set(cacheKey, nextId);
+            currentId = nextId;
+        }
+
+        return currentId;
+    }
+
+    async uploadFileByPath(
+        rootFolderId: string,
+        fullPath: string,
+        content: string | ArrayBuffer,
+        existingFileId?: string,
+        options?: { ifMatch?: string; mimeType?: string }
+    ): Promise<{ id: string; parentId: string; name: string }> {
+        const normalized = fullPath.replace(/\\/g, '/').replace(/^\/+/, '');
+        const lastSlash = normalized.lastIndexOf('/');
+        const folderPath = lastSlash === -1 ? '' : normalized.slice(0, lastSlash);
+        const name = lastSlash === -1 ? normalized : normalized.slice(lastSlash + 1);
+        const parentId = await this.ensureFolderPath(rootFolderId, folderPath);
+        const id = await this.uploadFile(name, content, parentId, existingFileId, options);
+        return { id, parentId, name };
+    }
+
+    async moveFile(fileId: string, newName: string, newParentId: string, oldParentId?: string): Promise<void> {
+        const params: string[] = [];
+        if (newParentId) params.push(`addParents=${encodeURIComponent(newParentId)}`);
+        if (oldParentId) params.push(`removeParents=${encodeURIComponent(oldParentId)}`);
+        const query = params.length > 0 ? `?${params.join('&')}` : '';
+
+        await this.apiRequest({
+            url: `https://www.googleapis.com/drive/v3/files/${fileId}${query}`,
+            method: 'PATCH',
+            contentType: 'application/json',
+            body: JSON.stringify({ name: newName })
+        });
     }
 
     async uploadFile(
@@ -194,12 +297,20 @@ export class GDriveHelper {
         const contentType = options?.mimeType || 'text/markdown'; // Default for Obsidian
         const metadataPart = 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata);
 
-        let body;
+        let body: string | ArrayBuffer;
         if (typeof content === 'string') {
             body = delimiter + metadataPart + delimiter + 'Content-Type: ' + contentType + '\r\n\r\n' + content + close_delim;
         } else {
-            const decoder = new TextDecoder('utf-8');
-            body = delimiter + metadataPart + delimiter + 'Content-Type: ' + contentType + '\r\n\r\n' + decoder.decode(content) + close_delim;
+            const encoder = new TextEncoder();
+            const preamble = delimiter + metadataPart + delimiter + 'Content-Type: ' + contentType + '\r\n\r\n';
+            const preBytes = encoder.encode(preamble);
+            const postBytes = encoder.encode(close_delim);
+            const contentBytes = new Uint8Array(content);
+            const bodyBytes = new Uint8Array(preBytes.length + contentBytes.length + postBytes.length);
+            bodyBytes.set(preBytes, 0);
+            bodyBytes.set(contentBytes, preBytes.length);
+            bodyBytes.set(postBytes, preBytes.length + contentBytes.length);
+            body = bodyBytes.buffer;
         }
 
         const headers: Record<string, string> = {
@@ -242,6 +353,29 @@ export class GDriveHelper {
             url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id, name, mimeType, trashed`,
             method: 'GET'
         });
+    }
+
+    async getFileParents(fileId: string): Promise<string[]> {
+        this.debugLog("Getting file parents", fileId);
+        const data = await this.apiRequest({
+            url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents`,
+            method: 'GET'
+        });
+        return data?.parents || [];
+    }
+
+    async getFileVersion(fileId: string): Promise<string | null> {
+        try {
+            this.debugLog("Getting file version", fileId);
+            const data = await this.apiRequest({
+                url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=version`,
+                method: 'GET'
+            });
+            return data?.version ? String(data.version) : null;
+        } catch (e) {
+            this.debugLog("Failed to get file version", e);
+            return null;
+        }
     }
 
     async downloadFile(fileId: string): Promise<ArrayBuffer> {

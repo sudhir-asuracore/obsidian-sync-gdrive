@@ -45,6 +45,7 @@ const context = await esbuild.context({
 		"process.env.GOOGLE_CLIENT_ID": JSON.stringify(process.env.GOOGLE_CLIENT_ID || ""),
 		"process.env.GOOGLE_CLIENT_SECRET": JSON.stringify(process.env.GOOGLE_CLIENT_SECRET || ""),
 		"process.env.GOOGLE_REDIRECT_URI": JSON.stringify(process.env.GOOGLE_REDIRECT_URI || ""),
+		"process.env.SYNC_DRIVE_DEBUG_LOGGING": JSON.stringify(process.env.SYNC_DRIVE_DEBUG_LOGGING || process.env.DEBUG_LOGGING || ""),
 	},
 });
 

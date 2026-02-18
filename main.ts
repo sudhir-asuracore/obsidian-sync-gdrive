@@ -1,5 +1,5 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl, TFile, Platform, ObsidianProtocolData, Menu as ObsidianMenu } from 'obsidian';
-import { createHash } from 'crypto';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl, TFile, Platform, ObsidianProtocolData, Menu as ObsidianMenu, setIcon } from 'obsidian';
+import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, randomBytes } from 'crypto';
 import { GDriveHelper } from './src/gdrive';
 
 interface SyncDriveSettings {
@@ -7,7 +7,19 @@ interface SyncDriveSettings {
 	refreshToken: string;
 	remoteFolderId: string;
 	userName: string;
-	debugLogging: boolean;
+	currentVaultId: string;
+	currentVaultName: string;
+	excludedFolders: string;
+	excludedPatterns: string;
+	syncImages: boolean;
+	syncAudio: boolean;
+	syncVideos: boolean;
+	syncPdfs: boolean;
+	syncAppearanceSettings: boolean;
+	syncThemesAndSnippets: boolean;
+	syncPlugins: boolean;
+	syncHotkeys: boolean;
+	encryptionKey: string;
 	autoSyncEnabled: boolean;
 	autoSyncIntervalValue: number;
 	autoSyncIntervalUnit: 'seconds' | 'minutes';
@@ -18,11 +30,42 @@ const DEFAULT_SETTINGS: SyncDriveSettings = {
 	refreshToken: '',
 	remoteFolderId: '',
 	userName: '',
-	debugLogging: true,
+	currentVaultId: '',
+	currentVaultName: '',
+	excludedFolders: '',
+	excludedPatterns: '',
+	syncImages: true,
+	syncAudio: true,
+	syncVideos: true,
+	syncPdfs: true,
+	syncAppearanceSettings: true,
+	syncThemesAndSnippets: true,
+	syncPlugins: true,
+	syncHotkeys: true,
+	encryptionKey: '',
 	autoSyncEnabled: false,
 	autoSyncIntervalValue: 5,
 	autoSyncIntervalUnit: 'minutes'
 }
+
+const ROOT_FOLDER_NAME = 'obsidian_notes';
+const METADATA_FILE_NAME = 'metadata.json';
+const VAULT_META_FILE_NAME = 'vaults-meta.json';
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp', 'tif', 'tiff', 'heic', 'heif']);
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac', 'opus', 'aiff']);
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'mpg', 'mpeg', '3gp']);
+
+const APPEARANCE_SETTING_FILES = new Set([
+	'appearance.json',
+	'snippets.json'
+]);
+const ENCRYPTION_MAGIC = Buffer.from('SDENC1');
+const ENCRYPTION_TESTER_TEXT = 'encrypt_tester';
+const ENCRYPTION_SALT_BYTES = 16;
+const ENCRYPTION_IV_BYTES = 12;
+const ENCRYPTION_TAG_BYTES = 16;
+const ENCRYPTION_ITERATIONS = 100000;
 
 interface RemoteMetadataEntry {
 	id?: string;
@@ -32,6 +75,7 @@ interface RemoteMetadataEntry {
 	isDeleted?: boolean;
 	mimeType?: string;
 	version?: number;
+	parentId?: string;
 }
 
 interface RemoteMetadataFile {
@@ -40,9 +84,31 @@ interface RemoteMetadataFile {
 	lastSyncTimestamp: number;
 	lastSyncByDevice?: string;
 	files: Record<string, RemoteMetadataEntry>;
+	encrypt_tester?: string;
 }
 
 type LocalStateFile = RemoteMetadataFile;
+
+interface VaultMetaEntry {
+	id: string;
+	name: string;
+	createdAt: number;
+	lastSyncTimestamp?: number;
+	lastSyncByDevice?: string;
+}
+
+interface VaultsMetaFile {
+	schemaVersion: number;
+	updatedAt: number;
+	vaults: VaultMetaEntry[];
+}
+
+interface LocalVaultsMetaFile extends VaultsMetaFile {
+	rootFolderId: string;
+	remoteFileId?: string;
+	remoteVersion?: string;
+	cachedAt: number;
+}
 
 interface LocalHashCacheEntry {
 	hash: string;
@@ -82,6 +148,11 @@ export default class SyncDrivePlugin extends Plugin {
 	private deltaDirtyPaths = new Set<string>();
 	private deltaFlushTimer: number | null = null;
 	private deltaLoaded = false;
+	private deltaVaultKey: string | null = null;
+	private vaultsMetaCache: VaultsMetaFile | null = null;
+	private vaultsMetaFileId: string | null = null;
+	private vaultsMetaRootId: string | null = null;
+	private vaultsMetaVersion: string | null = null;
 
 	debugLog(message: string, ...args: any[]) {
 		if (this.debugEnabled) {
@@ -94,6 +165,452 @@ export default class SyncDrivePlugin extends Plugin {
 		if (this.gdrive) {
 			this.gdrive.setDebugEnabled(enabled);
 		}
+	}
+
+	isDebugEnabled(): boolean {
+		return this.debugEnabled;
+	}
+
+	private getDebugLoggingFromEnv(): boolean {
+		const raw = String(process.env.SYNC_DRIVE_DEBUG_LOGGING || '').trim().toLowerCase();
+		if (!raw) return false;
+		return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+	}
+
+	private getEncryptionKey(): string {
+		return this.settings.encryptionKey || '';
+	}
+
+	private isEncryptionEnabled(): boolean {
+		return this.getEncryptionKey().length > 0;
+	}
+
+	private getEncryptionMismatchMessage(): string {
+		return 'Encryption key mismatch. Please verify the key and run a force push if the key was changed.';
+	}
+
+	private toArrayBuffer(data: Uint8Array): ArrayBuffer {
+		const copy = new Uint8Array(data.byteLength);
+		copy.set(data);
+		return copy.buffer;
+	}
+
+	private bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+		return this.toArrayBuffer(new Uint8Array(buffer));
+	}
+
+	private encryptContentWithKey(data: ArrayBuffer, key: string): ArrayBuffer {
+		const salt = randomBytes(ENCRYPTION_SALT_BYTES);
+		const iv = randomBytes(ENCRYPTION_IV_BYTES);
+		const derived = pbkdf2Sync(key, salt, ENCRYPTION_ITERATIONS, 32, 'sha256');
+		const cipher = createCipheriv('aes-256-gcm', derived, iv);
+		const ciphertext = Buffer.concat([
+			cipher.update(Buffer.from(data)),
+			cipher.final()
+		]);
+		const tag = cipher.getAuthTag();
+		const payload = Buffer.concat([ENCRYPTION_MAGIC, salt, iv, tag, ciphertext]);
+		return this.bufferToArrayBuffer(payload);
+	}
+
+	private decryptContentWithKey(data: ArrayBuffer, key: string): ArrayBuffer {
+		const payload = Buffer.from(data);
+		const headerSize = ENCRYPTION_MAGIC.length + ENCRYPTION_SALT_BYTES + ENCRYPTION_IV_BYTES + ENCRYPTION_TAG_BYTES;
+		if (payload.length <= headerSize) {
+			throw new Error(this.getEncryptionMismatchMessage());
+		}
+		if (!payload.subarray(0, ENCRYPTION_MAGIC.length).equals(ENCRYPTION_MAGIC)) {
+			throw new Error(this.getEncryptionMismatchMessage());
+		}
+		let offset = ENCRYPTION_MAGIC.length;
+		const salt = payload.subarray(offset, offset + ENCRYPTION_SALT_BYTES);
+		offset += ENCRYPTION_SALT_BYTES;
+		const iv = payload.subarray(offset, offset + ENCRYPTION_IV_BYTES);
+		offset += ENCRYPTION_IV_BYTES;
+		const tag = payload.subarray(offset, offset + ENCRYPTION_TAG_BYTES);
+		offset += ENCRYPTION_TAG_BYTES;
+		const ciphertext = payload.subarray(offset);
+		const derived = pbkdf2Sync(key, salt, ENCRYPTION_ITERATIONS, 32, 'sha256');
+		const decipher = createDecipheriv('aes-256-gcm', derived, iv);
+		decipher.setAuthTag(tag);
+		const plaintext = Buffer.concat([
+			decipher.update(ciphertext),
+			decipher.final()
+		]);
+		return this.bufferToArrayBuffer(plaintext);
+	}
+
+	private encryptContent(data: ArrayBuffer): ArrayBuffer {
+		const key = this.getEncryptionKey();
+		if (!key) return data;
+		return this.encryptContentWithKey(data, key);
+	}
+
+	private decryptContent(data: ArrayBuffer): ArrayBuffer {
+		const key = this.getEncryptionKey();
+		if (!key) return data;
+		return this.decryptContentWithKey(data, key);
+	}
+
+	private decryptContentOrThrow(data: ArrayBuffer): ArrayBuffer {
+		if (!this.isEncryptionEnabled()) return data;
+		try {
+			return this.decryptContent(data);
+		} catch (e) {
+			throw new Error(this.getEncryptionMismatchMessage());
+		}
+	}
+
+	private buildEncryptionTester(): string {
+		const encoder = new TextEncoder();
+		const raw = encoder.encode(ENCRYPTION_TESTER_TEXT);
+		const encrypted = this.encryptContentWithKey(raw.buffer, this.getEncryptionKey());
+		return Buffer.from(encrypted).toString('base64');
+	}
+
+	private applyEncryptionTester(metadata: RemoteMetadataFile): RemoteMetadataFile {
+		metadata.encrypt_tester = this.buildEncryptionTester();
+		return metadata;
+	}
+
+	private verifyEncryptionTester(metadata: RemoteMetadataFile): void {
+		const tester = metadata.encrypt_tester;
+		if (!tester) {
+			if (this.isEncryptionEnabled()) {
+				throw new Error(this.getEncryptionMismatchMessage());
+			}
+			return;
+		}
+
+		try {
+			const decoded = Buffer.from(tester, 'base64');
+			const decrypted = this.decryptContentWithKey(this.bufferToArrayBuffer(decoded), this.getEncryptionKey());
+			const text = new TextDecoder('utf-8').decode(new Uint8Array(decrypted));
+			if (text !== ENCRYPTION_TESTER_TEXT) {
+				throw new Error(this.getEncryptionMismatchMessage());
+			}
+		} catch {
+			throw new Error(this.getEncryptionMismatchMessage());
+		}
+	}
+
+	private async readLocalFileForUpload(path: string, localFile: TFile | null): Promise<string | ArrayBuffer> {
+		if (this.isEncryptionEnabled()) {
+			const content = localFile instanceof TFile
+				? await this.app.vault.readBinary(localFile)
+				: await this.app.vault.adapter.readBinary(path);
+			return this.encryptContent(content);
+		}
+
+		return localFile instanceof TFile
+			? await this.app.vault.read(localFile)
+			: await this.app.vault.adapter.read(path);
+	}
+
+	private getLocalVaultName(): string {
+		const vault = this.app.vault as any;
+		if (typeof vault.getName === 'function') {
+			const name = vault.getName();
+			if (name) return String(name);
+		} else if (vault.getName) {
+			return String(vault.getName);
+		}
+
+		const root = this.app.vault.getRoot?.();
+		if (root?.name) return root.name;
+		return 'vault';
+	}
+
+	private computeStringHash(value: string): string {
+		return createHash('md5').update(value).digest('hex');
+	}
+
+	private getRootScopedFileName(baseName: string, rootFolderId: string): string {
+		const key = this.computeStringHash(rootFolderId);
+		const dot = baseName.lastIndexOf('.');
+		if (dot === -1) {
+			return `${baseName}-${key}`;
+		}
+		return `${baseName.slice(0, dot)}-${key}${baseName.slice(dot)}`;
+	}
+
+	private getVaultStateKey(): string {
+		const source = this.settings.currentVaultId
+			|| this.settings.currentVaultName
+			|| this.getLocalVaultName();
+		return this.computeStringHash(String(source));
+	}
+
+	private getVaultScopedFileName(baseName: string): string {
+		const key = this.getVaultStateKey();
+		const dot = baseName.lastIndexOf('.');
+		if (dot === -1) {
+			return `${baseName}-${key}`;
+		}
+		return `${baseName.slice(0, dot)}-${key}${baseName.slice(dot)}`;
+	}
+
+	private isReservedRemotePath(path: string): boolean {
+		const normalized = this.normalizePath(path);
+		return normalized === METADATA_FILE_NAME || normalized === VAULT_META_FILE_NAME;
+	}
+
+	private getRemoteFilePath(remoteFile: any): string {
+		return this.normalizePath(remoteFile.path || remoteFile.name || '');
+	}
+
+	private filterRemoteVaultFiles(remoteFiles: any[]): any[] {
+		return remoteFiles.filter(file => !this.isReservedRemotePath(this.getRemoteFilePath(file)));
+	}
+
+	private normalizePath(path: string): string {
+		return path.replace(/\\/g, '/');
+	}
+
+	private getPathDir(path: string): string {
+		const normalized = this.normalizePath(path);
+		const slash = normalized.lastIndexOf('/');
+		if (slash === -1) return '';
+		return normalized.slice(0, slash);
+	}
+
+	private getPathBase(path: string): string {
+		const normalized = this.normalizePath(path);
+		const slash = normalized.lastIndexOf('/');
+		if (slash === -1) return normalized;
+		return normalized.slice(slash + 1);
+	}
+
+	private getConfigDirPrefix(): string {
+		const configDir = this.app.vault.configDir || '.obsidian';
+		const normalized = this.normalizePath(configDir).replace(/^\/+/, '').replace(/\/+$/, '');
+		return `${normalized}/`;
+	}
+
+	private shouldIncludeConfigFiles(): boolean {
+		return !!(
+			this.settings.syncAppearanceSettings
+			|| this.settings.syncThemesAndSnippets
+			|| this.settings.syncPlugins
+			|| this.settings.syncHotkeys
+		);
+	}
+
+	private async listConfigDirFiles(): Promise<string[]> {
+		const adapter = this.app.vault.adapter;
+		const configDir = (this.app.vault.configDir || '.obsidian').replace(/\\/g, '/');
+		try {
+			const exists = await adapter.exists(configDir);
+			if (!exists) return [];
+		} catch {
+			return [];
+		}
+
+		const files: string[] = [];
+		const walk = async (dir: string): Promise<void> => {
+			const listing = await adapter.list(dir);
+			for (const file of listing.files) {
+				files.push(file.replace(/\\/g, '/'));
+			}
+			for (const folder of listing.folders) {
+				await walk(folder.replace(/\\/g, '/'));
+			}
+		};
+
+		await walk(configDir);
+		return files;
+	}
+
+	private async buildLocalFileMap(): Promise<Map<string, TFile | null>> {
+		const map = new Map<string, TFile | null>();
+		for (const localFile of this.app.vault.getFiles()) {
+			map.set(localFile.path, localFile);
+		}
+
+		if (this.shouldIncludeConfigFiles()) {
+			const configFiles = await this.listConfigDirFiles();
+			for (const path of configFiles) {
+				if (!map.has(path)) {
+					map.set(path, null);
+				}
+			}
+		}
+
+		return map;
+	}
+
+	private async ensureLocalFolderForPath(path: string): Promise<void> {
+		const dir = this.getPathDir(path);
+		if (!dir) return;
+		const adapter = this.app.vault.adapter;
+		const segments = dir.split('/').filter(Boolean);
+		let current = '';
+		for (const segment of segments) {
+			current = current ? `${current}/${segment}` : segment;
+			try {
+				const exists = await adapter.exists(current);
+				if (!exists) {
+					await adapter.mkdir(current);
+				}
+			} catch {
+				// Ignore errors for existing folders or adapters without mkdir support.
+			}
+		}
+	}
+
+	private isObsidianPathAllowed(path: string): boolean {
+		const normalized = this.normalizePath(path);
+		const configPrefix = this.getConfigDirPrefix();
+		if (!normalized.startsWith(configPrefix)) return false;
+
+		const relative = normalized.slice(configPrefix.length);
+		if (this.settings.syncAppearanceSettings && APPEARANCE_SETTING_FILES.has(relative)) {
+			return true;
+		}
+		if (this.settings.syncHotkeys && relative === 'hotkeys.json') {
+			return true;
+		}
+		if (this.settings.syncThemesAndSnippets) {
+			if (relative.startsWith('themes/') || relative.startsWith('snippets/')) {
+				return true;
+			}
+		}
+		if (this.settings.syncPlugins && relative.endsWith('-plugins.json')) {
+			return true;
+		}
+		if (this.settings.syncPlugins && relative.startsWith('plugins/')) {
+			const selfPluginPath = `plugins/${this.manifest.id}`;
+			if (relative === selfPluginPath || relative.startsWith(`${selfPluginPath}/`)) {
+				return false;
+			}
+			return true;
+		}
+		return false;
+	}
+
+	private getExcludedFolderPrefixes(): string[] {
+		const raw = this.settings.excludedFolders || '';
+		return raw
+			.split(/[\n,;]+/)
+			.map(entry => entry.trim())
+			.filter(Boolean)
+			.map(entry => this.normalizePath(entry.replace(/^\/+/, '')))
+			.map(entry => (entry.endsWith('/') ? entry : `${entry}/`));
+	}
+
+	private globToRegExp(pattern: string): RegExp {
+		let expression = '^';
+		const normalized = this.normalizePath(pattern);
+		for (const char of normalized) {
+			if (char === '*') {
+				expression += '.*';
+			} else if (char === '?') {
+				expression += '.';
+			} else {
+				expression += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			}
+		}
+		expression += '$';
+		return new RegExp(expression);
+	}
+
+	private matchesExcludePatterns(path: string): boolean {
+		const raw = this.settings.excludedPatterns || '';
+		const patterns = raw
+			.split(/[\n,;]+/)
+			.map(entry => entry.trim())
+			.filter(Boolean);
+		if (!patterns.length) return false;
+
+		const normalized = this.normalizePath(path);
+		for (const pattern of patterns) {
+			if (pattern.startsWith('/') && pattern.endsWith('/') && pattern.length > 2) {
+				try {
+					const regex = new RegExp(pattern.slice(1, -1));
+					if (regex.test(normalized)) return true;
+				} catch (e) {
+					continue;
+				}
+			} else {
+				const regex = this.globToRegExp(pattern);
+				if (regex.test(normalized)) return true;
+			}
+		}
+		return false;
+	}
+
+	private getPathExtension(path: string): string {
+		const normalized = this.normalizePath(path);
+		const slash = normalized.lastIndexOf('/');
+		const dot = normalized.lastIndexOf('.');
+		if (dot === -1 || (slash !== -1 && dot < slash)) return '';
+		return normalized.slice(dot + 1).toLowerCase();
+	}
+
+	private isExcludedByFileType(path: string): boolean {
+		const ext = this.getPathExtension(path);
+		if (!ext) return false;
+		if (!this.settings.syncImages && IMAGE_EXTENSIONS.has(ext)) return true;
+		if (!this.settings.syncAudio && AUDIO_EXTENSIONS.has(ext)) return true;
+		if (!this.settings.syncVideos && VIDEO_EXTENSIONS.has(ext)) return true;
+		if (!this.settings.syncPdfs && ext === 'pdf') return true;
+		return false;
+	}
+
+	private isPathExcluded(path: string): boolean {
+		if (!path) return false;
+		const normalized = this.normalizePath(path);
+		const configPrefix = this.getConfigDirPrefix();
+		if (normalized.startsWith(configPrefix)) {
+			if (!this.isObsidianPathAllowed(normalized)) return true;
+		}
+
+		const prefixes = this.getExcludedFolderPrefixes();
+		for (const prefix of prefixes) {
+			if (normalized.startsWith(prefix)) return true;
+		}
+
+		if (this.matchesExcludePatterns(normalized)) return true;
+		if (this.isExcludedByFileType(normalized)) return true;
+
+		return false;
+	}
+
+	private filterRemoteVaultFilesForSync(remoteFiles: any[]): any[] {
+		return remoteFiles.filter(file => {
+			const path = this.getRemoteFilePath(file);
+			return !this.isReservedRemotePath(path) && !this.isPathExcluded(path);
+		});
+	}
+
+	private filterLocalCurrentBySyncRules(localCurrent: Record<string, LocalFileState>): Record<string, LocalFileState> {
+		const filtered: Record<string, LocalFileState> = {};
+		for (const [path, entry] of Object.entries(localCurrent)) {
+			if (!this.isPathExcluded(path)) {
+				filtered[path] = entry;
+			}
+		}
+		return filtered;
+	}
+
+	private filterMetadataBySyncRules(metadata: RemoteMetadataFile): RemoteMetadataFile {
+		const filtered: Record<string, RemoteMetadataEntry> = {};
+		for (const [path, entry] of Object.entries(metadata.files)) {
+			if (!this.isPathExcluded(path)) {
+				filtered[path] = entry;
+			}
+		}
+		return {
+			...metadata,
+			files: filtered
+		};
+	}
+
+	private resetVaultScopedState() {
+		this.deltaDirtyPaths = new Set<string>();
+		this.deltaLoaded = false;
+		this.deltaVaultKey = null;
+		this.clearDeltaFlushTimer();
 	}
 
 	private getPluginDataPath(fileName: string): string {
@@ -112,10 +629,17 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private async loadLocalState(): Promise<LocalStateFile> {
-		const path = this.getPluginDataPath('local-state.json');
+		const scopedPath = this.getPluginDataPath(this.getVaultScopedFileName('local-state.json'));
+		const legacyPath = this.getPluginDataPath('local-state.json');
 		try {
-			if (await this.app.vault.adapter.exists(path)) {
-				const raw = await this.app.vault.adapter.read(path);
+			if (await this.app.vault.adapter.exists(scopedPath)) {
+				const raw = await this.app.vault.adapter.read(scopedPath);
+				const parsed = JSON.parse(raw);
+				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
+					return parsed as LocalStateFile;
+				}
+			} else if (await this.app.vault.adapter.exists(legacyPath)) {
+				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
 					return parsed as LocalStateFile;
@@ -136,15 +660,22 @@ export default class SyncDrivePlugin extends Plugin {
 
 	private async saveLocalState(state: LocalStateFile): Promise<void> {
 		await this.ensurePluginDataDir();
-		const path = this.getPluginDataPath('local-state.json');
+		const path = this.getPluginDataPath(this.getVaultScopedFileName('local-state.json'));
 		await this.app.vault.adapter.write(path, JSON.stringify(state, null, 2));
 	}
 
 	private async loadLocalHashCache(): Promise<LocalHashCacheFile> {
-		const path = this.getPluginDataPath('local-hash-cache.json');
+		const scopedPath = this.getPluginDataPath(this.getVaultScopedFileName('local-hash-cache.json'));
+		const legacyPath = this.getPluginDataPath('local-hash-cache.json');
 		try {
-			if (await this.app.vault.adapter.exists(path)) {
-				const raw = await this.app.vault.adapter.read(path);
+			if (await this.app.vault.adapter.exists(scopedPath)) {
+				const raw = await this.app.vault.adapter.read(scopedPath);
+				const parsed = JSON.parse(raw);
+				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
+					return parsed as LocalHashCacheFile;
+				}
+			} else if (await this.app.vault.adapter.exists(legacyPath)) {
+				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
 					return parsed as LocalHashCacheFile;
@@ -163,16 +694,25 @@ export default class SyncDrivePlugin extends Plugin {
 
 	private async saveLocalHashCache(cache: LocalHashCacheFile): Promise<void> {
 		await this.ensurePluginDataDir();
-		const path = this.getPluginDataPath('local-hash-cache.json');
+		const path = this.getPluginDataPath(this.getVaultScopedFileName('local-hash-cache.json'));
 		await this.app.vault.adapter.write(path, JSON.stringify(cache, null, 2));
 	}
 
 	private async loadDeltaState(): Promise<void> {
-		if (this.deltaLoaded) return;
-		const path = this.getPluginDataPath('autosync-delta.json');
+		const key = this.getVaultStateKey();
+		if (this.deltaLoaded && this.deltaVaultKey === key) return;
+		this.deltaDirtyPaths = new Set<string>();
+		const scopedPath = this.getPluginDataPath(this.getVaultScopedFileName('autosync-delta.json'));
+		const legacyPath = this.getPluginDataPath('autosync-delta.json');
 		try {
-			if (await this.app.vault.adapter.exists(path)) {
-				const raw = await this.app.vault.adapter.read(path);
+			if (await this.app.vault.adapter.exists(scopedPath)) {
+				const raw = await this.app.vault.adapter.read(scopedPath);
+				const parsed = JSON.parse(raw);
+				if (parsed && Array.isArray(parsed.paths)) {
+					this.deltaDirtyPaths = new Set(parsed.paths);
+				}
+			} else if (await this.app.vault.adapter.exists(legacyPath)) {
+				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && Array.isArray(parsed.paths)) {
 					this.deltaDirtyPaths = new Set(parsed.paths);
@@ -182,6 +722,7 @@ export default class SyncDrivePlugin extends Plugin {
 			console.warn("Failed to load autosync delta state", e);
 		}
 		this.deltaLoaded = true;
+		this.deltaVaultKey = key;
 	}
 
 	private clearDeltaFlushTimer() {
@@ -200,7 +741,7 @@ export default class SyncDrivePlugin extends Plugin {
 
 	private async flushDeltaState(): Promise<void> {
 		await this.ensurePluginDataDir();
-		const path = this.getPluginDataPath('autosync-delta.json');
+		const path = this.getPluginDataPath(this.getVaultScopedFileName('autosync-delta.json'));
 		const payload = {
 			updatedAt: Date.now(),
 			paths: Array.from(this.deltaDirtyPaths)
@@ -209,7 +750,7 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private markDelta(path?: string) {
-		if (path && !path.startsWith('.obsidian/')) {
+		if (path && !this.isPathExcluded(path)) {
 			this.deltaDirtyPaths.add(path);
 		}
 		this.scheduleDeltaFlush();
@@ -234,51 +775,299 @@ export default class SyncDrivePlugin extends Plugin {
 		}));
 	}
 
-	private async loadRemoteMetadata(folderId: string): Promise<{ metadata: RemoteMetadataFile | null; fileId: string | null; etag: string | null }> {
-		const metadataFile = await this.gdrive.findFileByName(folderId, 'metadata.json');
-		if (!metadataFile) {
-			return { metadata: null, fileId: null, etag: null };
+	private createEmptyVaultsMeta(): VaultsMetaFile {
+		return {
+			schemaVersion: 1,
+			updatedAt: Date.now(),
+			vaults: []
+		};
+	}
+
+	private async loadLocalVaultsMeta(rootFolderId: string): Promise<LocalVaultsMetaFile | null> {
+		const path = this.getPluginDataPath(this.getRootScopedFileName('vaults-meta-local.json', rootFolderId));
+		try {
+			if (await this.app.vault.adapter.exists(path)) {
+				const raw = await this.app.vault.adapter.read(path);
+				const parsed = JSON.parse(raw);
+				if (parsed && parsed.schemaVersion === 1 && Array.isArray(parsed.vaults) && parsed.rootFolderId === rootFolderId) {
+					return parsed as LocalVaultsMetaFile;
+				}
+			}
+		} catch (e) {
+			console.warn("Failed to load local vaults meta cache", e);
+		}
+		return null;
+	}
+
+	private async saveLocalVaultsMeta(rootFolderId: string, meta: VaultsMetaFile, fileId?: string | null, version?: string | null): Promise<void> {
+		await this.ensurePluginDataDir();
+		const path = this.getPluginDataPath(this.getRootScopedFileName('vaults-meta-local.json', rootFolderId));
+		const payload: LocalVaultsMetaFile = {
+			schemaVersion: meta.schemaVersion,
+			updatedAt: meta.updatedAt,
+			vaults: meta.vaults,
+			rootFolderId: rootFolderId,
+			remoteFileId: fileId || undefined,
+			remoteVersion: version || undefined,
+			cachedAt: Date.now()
+		};
+		await this.app.vault.adapter.write(path, JSON.stringify(payload, null, 2));
+	}
+
+	private async loadVaultsMeta(rootFolderId: string): Promise<{ meta: VaultsMetaFile | null; fileId: string | null; version: string | null }> {
+		const metaFile = await this.gdrive.findFileByName(rootFolderId, VAULT_META_FILE_NAME);
+		if (!metaFile) {
+			return { meta: null, fileId: null, version: null };
 		}
 
-		const etag = await this.gdrive.getFileEtag(metadataFile.id);
+		const version = metaFile.version ? String(metaFile.version) : null;
+		const data = await this.gdrive.downloadFile(metaFile.id);
+		const raw = new TextDecoder('utf-8').decode(data);
+		try {
+			const parsed = JSON.parse(raw);
+			if (parsed && parsed.schemaVersion === 1 && Array.isArray(parsed.vaults)) {
+				return { meta: parsed as VaultsMetaFile, fileId: metaFile.id, version: version };
+			}
+		} catch (e) {
+			console.warn("Failed to parse vaults meta; treating as missing", e);
+		}
+
+		return { meta: null, fileId: metaFile.id || null, version: version };
+	}
+
+	private async ensureVaultsMeta(rootFolderId: string, forceRefresh = false): Promise<VaultsMetaFile> {
+		if (!forceRefresh && this.vaultsMetaCache && this.vaultsMetaRootId === rootFolderId) {
+			return this.vaultsMetaCache;
+		}
+
+		const metaInfo = await this.loadVaultsMeta(rootFolderId);
+		if (metaInfo.meta) {
+			this.vaultsMetaCache = metaInfo.meta;
+			this.vaultsMetaFileId = metaInfo.fileId;
+			this.vaultsMetaRootId = rootFolderId;
+			this.vaultsMetaVersion = metaInfo.version;
+			await this.saveLocalVaultsMeta(rootFolderId, metaInfo.meta, metaInfo.fileId, metaInfo.version);
+			return metaInfo.meta;
+		}
+
+		const meta = this.createEmptyVaultsMeta();
+		// If legacy storage exists (metadata.json at root), treat root folder as a vault.
+		const legacyMetadata = await this.gdrive.findFileByName(rootFolderId, METADATA_FILE_NAME);
+		if (legacyMetadata) {
+			meta.vaults.push({
+				id: rootFolderId,
+				name: this.settings.currentVaultName || this.getLocalVaultName(),
+				createdAt: Date.now()
+			});
+		}
+
+		const fileId = await this.gdrive.uploadFile(
+			VAULT_META_FILE_NAME,
+			JSON.stringify(meta, null, 2),
+			rootFolderId,
+			undefined,
+			{ mimeType: 'application/json' }
+		);
+		this.vaultsMetaCache = meta;
+		this.vaultsMetaFileId = fileId;
+		this.vaultsMetaRootId = rootFolderId;
+		this.vaultsMetaVersion = null;
+		await this.saveLocalVaultsMeta(rootFolderId, meta, fileId, null);
+		return meta;
+	}
+
+	private async saveVaultsMeta(rootFolderId: string, meta: VaultsMetaFile): Promise<void> {
+		if (this.vaultsMetaFileId && this.vaultsMetaVersion) {
+			const currentVersion = await this.gdrive.getFileVersion(this.vaultsMetaFileId);
+			if (currentVersion && currentVersion !== this.vaultsMetaVersion) {
+				this.debugLog("Vaults meta version changed; skipping update", {
+					expected: this.vaultsMetaVersion,
+					actual: currentVersion
+				});
+				this.vaultsMetaCache = null;
+				this.vaultsMetaVersion = null;
+				return;
+			}
+		}
+
+		meta.updatedAt = Date.now();
+		const fileId = await this.gdrive.uploadFile(
+			VAULT_META_FILE_NAME,
+			JSON.stringify(meta, null, 2),
+			rootFolderId,
+			this.vaultsMetaFileId || undefined,
+			{ mimeType: 'application/json' }
+		);
+		const newVersion = await this.gdrive.getFileVersion(fileId);
+		this.vaultsMetaCache = meta;
+		this.vaultsMetaFileId = fileId;
+		this.vaultsMetaRootId = rootFolderId;
+		this.vaultsMetaVersion = newVersion;
+		await this.saveLocalVaultsMeta(rootFolderId, meta, fileId, newVersion);
+	}
+
+	private async setCurrentVault(entry: VaultMetaEntry): Promise<void> {
+		this.settings.currentVaultId = entry.id;
+		this.settings.currentVaultName = entry.name;
+		await this.saveSettings();
+		this.resetVaultScopedState();
+		await this.loadDeltaState();
+	}
+
+	private getCachedVaultList(): VaultMetaEntry[] {
+		return this.vaultsMetaCache?.vaults ?? [];
+	}
+
+	private async selectOrCreateVaultByName(name?: string): Promise<VaultMetaEntry | null> {
+		if (!this.settings.accessToken) return null;
+
+		const rootFolderId = await this.getRootFolderId();
+		if (!rootFolderId) return null;
+
+		const desiredName = (name || this.settings.currentVaultName || this.getLocalVaultName()).trim();
+		const meta = await this.ensureVaultsMeta(rootFolderId);
+
+		const existing = meta.vaults.find(vault => vault.name === desiredName);
+		if (existing) {
+			await this.setCurrentVault(existing);
+			return existing;
+		}
+
+		const existingFolderId = await this.gdrive.getFolderIdInParent(rootFolderId, desiredName);
+		if (existingFolderId) {
+			const entry: VaultMetaEntry = {
+				id: existingFolderId,
+				name: desiredName,
+				createdAt: Date.now()
+			};
+			meta.vaults.push(entry);
+			await this.saveVaultsMeta(rootFolderId, meta);
+			await this.setCurrentVault(entry);
+			return entry;
+		}
+
+		const folderId = await this.gdrive.createFolder(desiredName, rootFolderId);
+		const entry: VaultMetaEntry = {
+			id: folderId,
+			name: desiredName,
+			createdAt: Date.now()
+		};
+		meta.vaults.push(entry);
+		await this.saveVaultsMeta(rootFolderId, meta);
+		await this.setCurrentVault(entry);
+		return entry;
+	}
+
+	private async ensureVaultSelected(rootFolderIdOverride?: string): Promise<VaultMetaEntry | null> {
+		if (!this.settings.accessToken) return null;
+
+		const rootFolderId = rootFolderIdOverride || await this.getRootFolderId();
+		if (!rootFolderId) return null;
+
+		const meta = await this.ensureVaultsMeta(rootFolderId);
+		if (this.settings.currentVaultId) {
+			const current = meta.vaults.find(vault => vault.id === this.settings.currentVaultId);
+			if (current) return current;
+		}
+
+		const desiredName = (this.settings.currentVaultName || this.getLocalVaultName()).trim();
+		const byName = meta.vaults.find(vault => vault.name === desiredName);
+		if (byName) {
+			await this.setCurrentVault(byName);
+			return byName;
+		}
+
+		if (meta.vaults.length === 1) {
+			await this.setCurrentVault(meta.vaults[0]);
+			return meta.vaults[0];
+		}
+
+		return await this.selectOrCreateVaultByName(desiredName);
+	}
+
+	private async getVaultFolderId(rootFolderIdOverride?: string): Promise<string> {
+		const entry = await this.ensureVaultSelected(rootFolderIdOverride);
+		return entry?.id || "";
+	}
+
+	private async updateVaultMetaOnSync(rootFolderId: string, vaultId: string): Promise<void> {
+		const meta = await this.ensureVaultsMeta(rootFolderId);
+		const entry = meta.vaults.find(vault => vault.id === vaultId);
+		if (!entry) return;
+		entry.lastSyncTimestamp = Date.now();
+		entry.lastSyncByDevice = this.settings.userName || 'unknown';
+		await this.saveVaultsMeta(rootFolderId, meta);
+	}
+
+	private async loadRemoteMetadata(folderId: string): Promise<{ metadata: RemoteMetadataFile | null; fileId: string | null; version: string | null }> {
+		const metadataFiles = await this.gdrive.findFilesByName(folderId, METADATA_FILE_NAME);
+		if (metadataFiles.length === 0) {
+			return { metadata: null, fileId: null, version: null };
+		}
+
+		let metadataFile = metadataFiles[0];
+		if (metadataFiles.length > 1) {
+			const sorted = [...metadataFiles].sort((a, b) => {
+				const aTime = a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0;
+				const bTime = b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0;
+				if (aTime !== bTime) return bTime - aTime;
+				const aVersion = a.version ? Number(a.version) : 0;
+				const bVersion = b.version ? Number(b.version) : 0;
+				return bVersion - aVersion;
+			});
+			metadataFile = sorted[0];
+			this.debugLog("Multiple metadata.json files found; using most recent", {
+				count: metadataFiles.length,
+				chosenId: metadataFile.id
+			});
+		}
+
+		const version = metadataFile.version ? String(metadataFile.version) : null;
 		const data = await this.gdrive.downloadFile(metadataFile.id);
 		const raw = new TextDecoder('utf-8').decode(data);
 		try {
 			const parsed = JSON.parse(raw);
 			if (parsed && parsed.schemaVersion === 1 && parsed.files) {
-				return { metadata: parsed as RemoteMetadataFile, fileId: metadataFile.id, etag: etag };
+				this.verifyEncryptionTester(parsed as RemoteMetadataFile);
+				return { metadata: parsed as RemoteMetadataFile, fileId: metadataFile.id, version: version };
 			}
-		} catch (e) {
+		} catch (e: any) {
+			if (e instanceof Error && e.message === this.getEncryptionMismatchMessage()) {
+				throw e;
+			}
 			console.warn("Failed to parse remote metadata; treating as missing", e);
 		}
 
-		return { metadata: null, fileId: metadataFile.id || null, etag: etag };
+		return { metadata: null, fileId: metadataFile.id || null, version: version };
 	}
 
 	private async buildRemoteMetadataFromDrive(folderId: string): Promise<RemoteMetadataFile> {
-		const remoteFiles = await this.gdrive.listFiles(folderId);
+		const remoteFiles = await this.gdrive.listFilesRecursive(folderId);
 		const files: Record<string, RemoteMetadataEntry> = {};
 		for (const file of remoteFiles) {
-			if (file.name === 'metadata.json') continue;
+			const path = this.getRemoteFilePath(file);
+			if (!path || this.isReservedRemotePath(path)) continue;
 			const modifiedTime = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
-			files[file.name] = {
+			files[path] = {
 				id: file.id,
 				hash: file.md5Checksum,
 				modifiedTime: modifiedTime,
 				size: file.size ? Number(file.size) : undefined,
 				isDeleted: false,
 				mimeType: file.mimeType,
-				version: file.version ? Number(file.version) : undefined
+				version: file.version ? Number(file.version) : undefined,
+				parentId: file.parentId
 			};
 		}
 
-		return {
+		const metadata: RemoteMetadataFile = {
 			schemaVersion: 1,
 			rootFolderId: folderId,
 			lastSyncTimestamp: 0,
 			lastSyncByDevice: this.settings.userName || 'unknown',
 			files: files
 		};
+		return this.applyEncryptionTester(metadata);
 	}
 
 	private computeHash(content: ArrayBuffer): string {
@@ -288,25 +1077,37 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private async scanLocalFiles(hashCache: LocalHashCacheFile): Promise<{ files: Record<string, LocalFileState>; cache: LocalHashCacheFile }> {
-		const localFiles = this.app.vault.getFiles();
+		const fileByPath = await this.buildLocalFileMap();
+
 		const result: Record<string, LocalFileState> = {};
 		const nextCache: LocalHashCacheFile = {
 			schemaVersion: 1,
 			updatedAt: Date.now(),
 			files: {}
 		};
-		for (const localFile of localFiles) {
-			if (localFile.path.startsWith('.obsidian/')) continue;
-			const size = localFile.stat.size;
-			const modifiedTime = localFile.stat.mtime;
-			const cached = hashCache.files[localFile.path];
+		for (const [path, localFile] of fileByPath.entries()) {
+			if (this.isPathExcluded(path)) continue;
+
+			let size = 0;
+			let modifiedTime = 0;
+			if (localFile instanceof TFile) {
+				size = localFile.stat.size;
+				modifiedTime = localFile.stat.mtime;
+			} else {
+				const stat = await this.app.vault.adapter.stat(path);
+				if (!stat || stat.type !== 'file') continue;
+				size = stat.size;
+				modifiedTime = stat.mtime;
+			}
+
+			const cached = hashCache.files[path];
 			if (cached && cached.size === size && cached.modifiedTime === modifiedTime && cached.hash) {
-				result[localFile.path] = {
+				result[path] = {
 					hash: cached.hash,
 					modifiedTime: modifiedTime,
 					size: size
 				};
-				nextCache.files[localFile.path] = {
+				nextCache.files[path] = {
 					hash: cached.hash,
 					modifiedTime: modifiedTime,
 					size: size
@@ -314,14 +1115,16 @@ export default class SyncDrivePlugin extends Plugin {
 				continue;
 			}
 
-			const content = await this.app.vault.readBinary(localFile);
+			const content = localFile instanceof TFile
+				? await this.app.vault.readBinary(localFile)
+				: await this.app.vault.adapter.readBinary(path);
 			const hash = this.computeHash(content);
-			result[localFile.path] = {
+			result[path] = {
 				hash: hash,
 				modifiedTime: modifiedTime,
 				size: size
 			};
-			nextCache.files[localFile.path] = {
+			nextCache.files[path] = {
 				hash: hash,
 				modifiedTime: modifiedTime,
 				size: size
@@ -463,6 +1266,16 @@ export default class SyncDrivePlugin extends Plugin {
 		return diff;
 	}
 
+	private hasDiffChanges(diff: SyncDiff): boolean {
+		return diff.renameLocal.length > 0
+			|| diff.renameRemote.length > 0
+			|| diff.toDownload.length > 0
+			|| diff.toUpload.length > 0
+			|| diff.toDeleteLocal.length > 0
+			|| diff.toDeleteRemote.length > 0
+			|| diff.conflicts.length > 0;
+	}
+
 	private getConflictPath(originalPath: string): string {
 		const dot = originalPath.lastIndexOf('.');
 		if (dot > 0) {
@@ -475,7 +1288,11 @@ export default class SyncDrivePlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
-		this.setDebugEnabled(!!this.settings.debugLogging);
+		if (!this.settings.currentVaultName) {
+			this.settings.currentVaultName = this.getLocalVaultName();
+			await this.saveSettings();
+		}
+		this.setDebugEnabled(this.getDebugLoggingFromEnv());
 
 		this.gdrive = new GDriveHelper(
 			this.settings.accessToken,
@@ -510,14 +1327,6 @@ export default class SyncDrivePlugin extends Plugin {
 		this.applyAutoSyncSettings();
 		await this.loadDeltaState();
 		this.registerVaultChangeListeners();
-
-		// Initialize remote folder if authenticated
-		if (this.settings.accessToken) {
-			this.debugLog("Initializing remote folder on load");
-			this.getRemoteFolderId().catch(e => {
-				console.error("Failed to initialize remote folder on load:", e);
-			});
-		}
 	}
 
 	async loadSettings() {
@@ -573,6 +1382,38 @@ export default class SyncDrivePlugin extends Plugin {
 			this.scheduleAutoSync();
 		} else {
 			this.clearAutoSyncTimer();
+		}
+	}
+
+	getSuggestedVaultName(): string {
+		return this.settings.currentVaultName || this.getLocalVaultName();
+	}
+
+	getVaultOptions(): VaultMetaEntry[] {
+		return this.getCachedVaultList();
+	}
+
+	async refreshVaultList(): Promise<void> {
+		if (!this.settings.accessToken) return;
+		const rootFolderId = await this.getRootFolderId();
+		if (!rootFolderId) return;
+		await this.ensureVaultsMeta(rootFolderId, true);
+	}
+
+	async applyVaultSelectionByName(): Promise<void> {
+		await this.selectOrCreateVaultByName(this.settings.currentVaultName);
+	}
+
+	async applyVaultSelectionById(vaultId: string): Promise<void> {
+		if (!this.settings.accessToken) return;
+		const rootFolderId = await this.getRootFolderId();
+		if (!rootFolderId) return;
+		const meta = await this.ensureVaultsMeta(rootFolderId);
+		const entry = meta.vaults.find(vault => vault.id === vaultId);
+		if (entry) {
+			await this.setCurrentVault(entry);
+		} else {
+			new Notice("Selected vault is no longer available. Refresh the vault list.");
 		}
 	}
 
@@ -645,7 +1486,8 @@ export default class SyncDrivePlugin extends Plugin {
 			new Notice(`Authenticated as ${this.settings.userName}`);
 
 			this.debugLog("Post-auth user info set", { userName: this.settings.userName });
-			await this.getRemoteFolderId();
+			await this.getRootFolderId();
+			await this.refreshVaultList();
 
 			// Refresh settings tab if open
 			(this.app as any).setting.openTabById(this.manifest.id);
@@ -676,7 +1518,7 @@ export default class SyncDrivePlugin extends Plugin {
 		this.ribbonIconEl.toggleClass('sync-drive-syncing', active);
 	}
 
-	async getRemoteFolderId(): Promise<string> {
+	async getRootFolderId(): Promise<string> {
 		if (!this.settings.accessToken) return "";
 
 		if (this.settings.remoteFolderId) {
@@ -694,11 +1536,11 @@ export default class SyncDrivePlugin extends Plugin {
 
 		try {
 			this.debugLog("Searching for remote folder by name");
-			let folderId = await this.gdrive.getFolderId('obsidian_notes');
+			let folderId = await this.gdrive.getFolderId(ROOT_FOLDER_NAME);
 			if (!folderId) {
-				new Notice("Creating remote folder 'obsidian_notes'...");
+				new Notice(`Creating remote folder '${ROOT_FOLDER_NAME}'...`);
 				this.debugLog("Remote folder not found, creating");
-				folderId = await this.gdrive.createFolder('obsidian_notes');
+				folderId = await this.gdrive.createFolder(ROOT_FOLDER_NAME);
 			}
 
 			this.settings.remoteFolderId = folderId;
@@ -729,36 +1571,66 @@ export default class SyncDrivePlugin extends Plugin {
 		this.setSyncingIndicator(true);
 		try {
 			this.debugLog("Sync started");
-			const folderId = await this.getRemoteFolderId();
-			if (!folderId) return;
+			const rootFolderId = await this.getRootFolderId();
+			if (!rootFolderId) return;
 
-			const remoteMetaInfo = await this.loadRemoteMetadata(folderId);
-			let remoteMetadata = remoteMetaInfo.metadata;
-			let metadataFileId = remoteMetaInfo.fileId;
-			let metadataEtag = remoteMetaInfo.etag;
+			const localState = await this.loadLocalState();
+			const localVaultsMeta = await this.loadLocalVaultsMeta(rootFolderId);
+			const resolvedVaultId = this.settings.currentVaultId
+				|| localVaultsMeta?.vaults.find(vault => vault.name === (this.settings.currentVaultName || this.getLocalVaultName()).trim())?.id
+				|| '';
 
-			if (!remoteMetadata) {
-				this.debugLog("No remote metadata found, rebuilding from Drive listing");
-				remoteMetadata = await this.buildRemoteMetadataFromDrive(folderId);
-				metadataFileId = await this.gdrive.uploadFile(
-					'metadata.json',
-					JSON.stringify(remoteMetadata, null, 2),
-					folderId,
-					metadataFileId || undefined,
-					{ mimeType: 'application/json' }
-				);
-				metadataEtag = null;
+			if (
+				resolvedVaultId &&
+				localVaultsMeta &&
+				localVaultsMeta.remoteFileId &&
+				localVaultsMeta.remoteVersion &&
+				!this.hasLocalDelta()
+			) {
+				const currentVersion = await this.gdrive.getFileVersion(localVaultsMeta.remoteFileId);
+				if (currentVersion && (Number(currentVersion) - 1) === Number(localVaultsMeta.remoteVersion)) {
+					this.debugLog("Sync skipped (local state matches cached vaults meta)", {
+						vaultId: resolvedVaultId,
+						lastSyncTimestamp: localState.lastSyncTimestamp
+					});
+					new Notice("No changes to sync.");
+					return;
+				}
 			}
 
-			let localState = await this.loadLocalState();
+			const folderId = resolvedVaultId || await this.getVaultFolderId(rootFolderId);
+			if (!folderId) return;
+
+			// const vaultsMeta = await this.ensureVaultsMeta(rootFolderId);
+			// const vaultEntry = vaultsMeta.vaults.find(vault => vault.id === folderId);
+
 			if (localState.rootFolderId && localState.rootFolderId !== folderId) {
-				localState = {
+				const resetState: LocalStateFile = {
 					schemaVersion: 1,
 					rootFolderId: folderId,
 					lastSyncTimestamp: 0,
 					lastSyncByDevice: '',
 					files: {}
 				};
+				await this.saveLocalState(resetState);
+				Object.assign(localState, resetState);
+			}
+
+			const remoteMetaInfo = await this.loadRemoteMetadata(folderId);
+			let remoteMetadata = remoteMetaInfo.metadata;
+			let metadataFileId = remoteMetaInfo.fileId;
+			const metadataVersion = remoteMetaInfo.version;
+
+			if (!remoteMetadata) {
+				this.debugLog("No remote metadata found, rebuilding from Drive listing");
+				remoteMetadata = await this.buildRemoteMetadataFromDrive(folderId);
+				metadataFileId = await this.gdrive.uploadFile(
+					METADATA_FILE_NAME,
+					JSON.stringify(remoteMetadata, null, 2),
+					folderId,
+					metadataFileId || undefined,
+					{ mimeType: 'application/json' }
+				);
 			}
 
 			const hashCache = await this.loadLocalHashCache();
@@ -773,7 +1645,11 @@ export default class SyncDrivePlugin extends Plugin {
 
 			new Notice("Syncing...");
 
-			const diff = this.buildDiff(remoteMetadata, localState, localCurrent);
+			const remoteMetadataForSync = this.filterMetadataBySyncRules(remoteMetadata);
+			const localStateForSync = this.filterMetadataBySyncRules(localState);
+			const localCurrentForSync = this.filterLocalCurrentBySyncRules(localCurrent);
+			const diff = this.buildDiff(remoteMetadataForSync, localStateForSync, localCurrentForSync);
+			const hasChanges = this.hasDiffChanges(diff);
 
 			for (const rename of diff.renameLocal) {
 				const localFile = this.app.vault.getAbstractFileByPath(rename.from);
@@ -795,21 +1671,27 @@ export default class SyncDrivePlugin extends Plugin {
 				diff.toDownload.push(conflict);
 			}
 
+			const configPrefix = this.getConfigDirPrefix();
+
 			for (const path of diff.toDownload) {
 				const remoteEntry = remoteMetadata.files[path];
 				if (!remoteEntry || remoteEntry.isDeleted || !remoteEntry.id) continue;
 				const content = await this.gdrive.downloadFile(remoteEntry.id);
+				const decrypted = this.decryptContentOrThrow(content);
+				await this.ensureLocalFolderForPath(path);
 				const localFile = this.app.vault.getAbstractFileByPath(path);
 				if (localFile instanceof TFile) {
-					await this.app.vault.modifyBinary(localFile, content);
+					await this.app.vault.modifyBinary(localFile, decrypted);
+				} else if (path.startsWith(configPrefix)) {
+					await this.app.vault.adapter.writeBinary(path, decrypted);
 				} else {
-					await this.app.vault.createBinary(path, content);
+					await this.app.vault.createBinary(path, decrypted);
 				}
-				const hash = remoteEntry.hash || this.computeHash(content);
+				const hash = remoteEntry.hash || this.computeHash(decrypted);
 				localCurrent[path] = {
 					hash: hash,
 					modifiedTime: remoteEntry.modifiedTime || Date.now(),
-					size: remoteEntry.size || content.byteLength
+					size: remoteEntry.size || decrypted.byteLength
 				};
 			}
 
@@ -818,27 +1700,42 @@ export default class SyncDrivePlugin extends Plugin {
 				if (localFile instanceof TFile) {
 					await this.app.vault.delete(localFile);
 					delete localCurrent[path];
+				} else if (path.startsWith(configPrefix)) {
+					await this.app.vault.adapter.remove(path);
+					delete localCurrent[path];
 				}
 			}
 
 			for (const rename of diff.renameRemote) {
-				await this.gdrive.updateFileMetadata(rename.id, { name: rename.to });
 				const entryPath = Object.keys(remoteMetadata.files).find(p => remoteMetadata.files[p].id === rename.id);
+				const newParentPath = this.getPathDir(rename.to);
+				const newName = this.getPathBase(rename.to);
+				const newParentId = await this.gdrive.ensureFolderPath(folderId, newParentPath);
+				let oldParentId = entryPath ? remoteMetadata.files[entryPath]?.parentId : undefined;
+				if (!oldParentId) {
+					const parents = await this.gdrive.getFileParents(rename.id);
+					oldParentId = parents.length > 0 ? parents[0] : undefined;
+				}
+				await this.gdrive.moveFile(rename.id, newName, newParentId, oldParentId);
 				if (entryPath && entryPath !== rename.to) {
-					remoteMetadata.files[rename.to] = remoteMetadata.files[entryPath];
+					remoteMetadata.files[rename.to] = {
+						...remoteMetadata.files[entryPath],
+						parentId: newParentId
+					};
 					delete remoteMetadata.files[entryPath];
 				}
 			}
 
 			for (const path of diff.toUpload) {
 				const localFile = this.app.vault.getAbstractFileByPath(path);
-				if (!(localFile instanceof TFile)) continue;
-				const content = await this.app.vault.read(localFile);
+				const content = await this.readLocalFileForUpload(path, localFile instanceof TFile ? localFile : null);
+				if (content === null) continue;
 				const remoteEntry = remoteMetadata.files[path];
 				const remoteId = remoteEntry && !remoteEntry.isDeleted ? remoteEntry.id : undefined;
-				const id = await this.gdrive.uploadFile(path, content, folderId, remoteId);
+				const uploaded = await this.gdrive.uploadFileByPath(folderId, path, content, remoteId);
 				remoteMetadata.files[path] = {
-					id: id,
+					id: uploaded.id,
+					parentId: uploaded.parentId,
 					hash: localCurrent[path].hash,
 					modifiedTime: localCurrent[path].modifiedTime,
 					size: localCurrent[path].size,
@@ -855,18 +1752,35 @@ export default class SyncDrivePlugin extends Plugin {
 				}
 			}
 
-			remoteMetadata.lastSyncTimestamp = Date.now();
-			remoteMetadata.lastSyncByDevice = this.settings.userName || 'unknown';
-			remoteMetadata.rootFolderId = folderId;
+			if (hasChanges) {
+				remoteMetadata.lastSyncTimestamp = Date.now();
+				remoteMetadata.lastSyncByDevice = this.settings.userName || 'unknown';
+				remoteMetadata.rootFolderId = folderId;
+				this.applyEncryptionTester(remoteMetadata);
+			}
 
 			try {
-				metadataFileId = await this.gdrive.uploadFile(
-					'metadata.json',
-					JSON.stringify(remoteMetadata, null, 2),
-					folderId,
-					metadataFileId || undefined,
-					{ ifMatch: metadataEtag || undefined, mimeType: 'application/json' }
-				);
+				if (hasChanges) {
+					if (metadataFileId && metadataVersion) {
+						const currentVersion = await this.gdrive.getFileVersion(metadataFileId);
+						if (currentVersion && currentVersion !== metadataVersion) {
+							new Notice("Sync interrupted: remote metadata changed. Please sync again.");
+							this.debugLog("Metadata version precondition failed", {
+								expected: metadataVersion,
+								actual: currentVersion
+							});
+							return;
+						}
+					}
+
+					metadataFileId = await this.gdrive.uploadFile(
+						METADATA_FILE_NAME,
+						JSON.stringify(remoteMetadata, null, 2),
+						folderId,
+						metadataFileId || undefined,
+						{ mimeType: 'application/json' }
+					);
+				}
 			} catch (e: any) {
 				if (String(e.message || '').includes('412')) {
 					new Notice("Sync interrupted: remote metadata changed. Please sync again.");
@@ -877,6 +1791,7 @@ export default class SyncDrivePlugin extends Plugin {
 			}
 
 			await this.saveLocalState(remoteMetadata);
+			await this.updateVaultMetaOnSync(rootFolderId, folderId);
 
 			const finalScan = await this.scanLocalFiles(hashCacheState);
 			hashCacheState = finalScan.cache;
@@ -905,54 +1820,90 @@ export default class SyncDrivePlugin extends Plugin {
 
 		try {
 			this.debugLog("Force push started");
-			const folderId = await this.getRemoteFolderId();
+			const folderId = await this.getVaultFolderId();
 			if (!folderId) return;
-			const remoteFiles = await this.gdrive.listFiles(folderId);
-			const localFiles = this.app.vault.getFiles();
+			const remoteMetaInfo = await this.loadRemoteMetadata(folderId);
+			let remoteMetadata = remoteMetaInfo.metadata;
+			const metadataFileId = remoteMetaInfo.fileId;
+			if (!remoteMetadata) {
+				remoteMetadata = await this.buildRemoteMetadataFromDrive(folderId);
+			}
 
-			console.log(folderId, remoteFiles.length, localFiles.length);
+			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.gdrive.listFilesRecursive(folderId));
+			const localFileMap = await this.buildLocalFileMap();
+			const localPaths = Array.from(localFileMap.keys()).filter(path => !this.isPathExcluded(path));
+			const localPathSet = new Set(localPaths);
+			const remoteFileByPath = new Map<string, any>();
+			for (const remoteFile of remoteFiles) {
+				const remotePath = this.getRemoteFilePath(remoteFile);
+				if (remotePath) {
+					remoteFileByPath.set(remotePath, remoteFile);
+				}
+			}
+
+			console.log(folderId, remoteFiles.length, localPaths.length);
 
 			new Notice("Force pushing local to remote...");
 
-			const uploadedIds: Record<string, string> = {};
+			const uploadedIds: Record<string, { id: string; parentId: string }> = {};
 
 			// Delete remote files that don't exist locally
 			for (const remoteFile of remoteFiles) {
-				if (!localFiles.find(f => f.path === remoteFile.name)) {
+				const remotePath = this.getRemoteFilePath(remoteFile);
+				if (remotePath && !localPathSet.has(remotePath)) {
 					if (remoteFile.capabilities?.canDelete) {
 						await this.gdrive.deleteFile(remoteFile.id);
 					} else {
-						console.warn(`Cannot delete remote file ${remoteFile.name} (insufficient permissions)`);
+						console.warn(`Cannot delete remote file ${remotePath} (insufficient permissions)`);
 					}
 				}
 			}
 
-			for (const localFile of localFiles) {
-				const remoteFile = remoteFiles.find(f => f.name === localFile.path);
+			for (const path of localPaths) {
+				const localFile = localFileMap.get(path) || null;
+				const remoteFile = remoteFileByPath.get(path);
 				if (remoteFile && !remoteFile.capabilities?.canEdit) {
-					console.warn(`Cannot update remote file ${localFile.path} (insufficient permissions). Skipping.`);
+					console.warn(`Cannot update remote file ${path} (insufficient permissions). Skipping.`);
 					continue;
 				}
-				const content = await this.app.vault.read(localFile);
-				const id = await this.gdrive.uploadFile(localFile.path, content, folderId, remoteFile?.id);
-				uploadedIds[localFile.path] = id;
+				const content = await this.readLocalFileForUpload(path, localFile instanceof TFile ? localFile : null);
+				const uploaded = await this.gdrive.uploadFileByPath(folderId, path, content, remoteFile?.id);
+				uploadedIds[path] = { id: uploaded.id, parentId: uploaded.parentId };
 			}
 
 			const hashCache = await this.loadLocalHashCache();
 			const scan = await this.scanLocalFiles(hashCache);
 			const localCurrent = scan.files;
 			const hashCacheState = scan.cache;
-			const newMetadata: RemoteMetadataFile = {
+			const baseMetadata: RemoteMetadataFile = remoteMetadata || {
 				schemaVersion: 1,
+				rootFolderId: folderId,
+				lastSyncTimestamp: 0,
+				lastSyncByDevice: '',
+				files: {}
+			};
+			const newMetadata: RemoteMetadataFile = {
+				...baseMetadata,
 				rootFolderId: folderId,
 				lastSyncTimestamp: Date.now(),
 				lastSyncByDevice: this.settings.userName || 'unknown',
-				files: {}
+				files: { ...baseMetadata.files }
 			};
+
+			for (const [path, entry] of Object.entries(newMetadata.files)) {
+				if (this.isPathExcluded(path)) continue;
+				if (!localCurrent[path]) {
+					newMetadata.files[path] = {
+						...entry,
+						isDeleted: true
+					};
+				}
+			}
 
 			for (const [path, entry] of Object.entries(localCurrent)) {
 				newMetadata.files[path] = {
-					id: uploadedIds[path],
+					id: uploadedIds[path]?.id,
+					parentId: uploadedIds[path]?.parentId,
 					hash: entry.hash,
 					modifiedTime: entry.modifiedTime,
 					size: entry.size,
@@ -961,17 +1912,23 @@ export default class SyncDrivePlugin extends Plugin {
 				};
 			}
 
+			this.applyEncryptionTester(newMetadata);
+
 			await this.gdrive.uploadFile(
-				'metadata.json',
+				METADATA_FILE_NAME,
 				JSON.stringify(newMetadata, null, 2),
 				folderId,
-				undefined,
+				metadataFileId || undefined,
 				{ mimeType: 'application/json' }
 			);
 
 			await this.saveLocalState(newMetadata);
 			await this.saveLocalHashCache(hashCacheState);
 			this.clearDelta();
+			const rootFolderId = await this.getRootFolderId();
+			if (rootFolderId) {
+				await this.updateVaultMetaOnSync(rootFolderId, folderId);
+			}
 
 			new Notice("Force push complete!");
 			this.debugLog("Force push complete");
@@ -989,41 +1946,59 @@ export default class SyncDrivePlugin extends Plugin {
 
 		try {
 			this.debugLog("Force pull started");
-			const folderId = await this.getRemoteFolderId();
+			const folderId = await this.getVaultFolderId();
 			if (!folderId) return;
 
-			const remoteFiles = await this.gdrive.listFiles(folderId);
+			const remoteMetaInfo = await this.loadRemoteMetadata(folderId);
+			let metadataFileId = remoteMetaInfo.fileId;
+
+			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.gdrive.listFilesRecursive(folderId));
 			this.debugLog("Force pull remote count", remoteFiles.length);
 
 			new Notice("Force pulling remote to local...");
 
-			const localFiles = this.app.vault.getFiles();
+			const localFileMap = await this.buildLocalFileMap();
+			const localPaths = Array.from(localFileMap.keys()).filter(path => !this.isPathExcluded(path));
+			const remotePathSet = new Set(remoteFiles.map(file => this.getRemoteFilePath(file)).filter(Boolean));
+			const configPrefix = this.getConfigDirPrefix();
 			// Delete local files that don't exist remotely
-			for (const localFile of localFiles) {
-				if (!remoteFiles.find(f => f.name === localFile.path)) {
-					await this.app.vault.delete(localFile);
+			for (const path of localPaths) {
+				if (!remotePathSet.has(path)) {
+					const localFile = localFileMap.get(path) || null;
+					if (localFile instanceof TFile) {
+						await this.app.vault.delete(localFile);
+					} else {
+						await this.app.vault.adapter.remove(path);
+					}
 				}
 			}
 
 			for (const remoteFile of remoteFiles) {
+				const remotePath = this.getRemoteFilePath(remoteFile);
+				if (!remotePath) continue;
 				const content = await this.gdrive.downloadFile(remoteFile.id);
-				const localFile = this.app.vault.getAbstractFileByPath(remoteFile.name);
+				const decrypted = this.decryptContentOrThrow(content);
+				await this.ensureLocalFolderForPath(remotePath);
+				const localFile = this.app.vault.getAbstractFileByPath(remotePath);
 
 				if (localFile instanceof TFile) {
-					await this.app.vault.modifyBinary(localFile, content);
+					await this.app.vault.modifyBinary(localFile, decrypted);
+				} else if (remotePath.startsWith(configPrefix)) {
+					await this.app.vault.adapter.writeBinary(remotePath, decrypted);
 				} else {
-					await this.app.vault.createBinary(remoteFile.name, content);
+					await this.app.vault.createBinary(remotePath, decrypted);
 				}
 			}
 
 			const newMetadata = await this.buildRemoteMetadataFromDrive(folderId);
 			newMetadata.lastSyncTimestamp = Date.now();
 			newMetadata.lastSyncByDevice = this.settings.userName || 'unknown';
+			this.applyEncryptionTester(newMetadata);
 			await this.gdrive.uploadFile(
-				'metadata.json',
+				METADATA_FILE_NAME,
 				JSON.stringify(newMetadata, null, 2),
 				folderId,
-				undefined,
+				metadataFileId || undefined,
 				{ mimeType: 'application/json' }
 			);
 
@@ -1034,6 +2009,10 @@ export default class SyncDrivePlugin extends Plugin {
 			await this.saveLocalState(newMetadata);
 			await this.saveLocalHashCache(hashCacheState);
 			this.clearDelta();
+			const rootFolderId = await this.getRootFolderId();
+			if (rootFolderId) {
+				await this.updateVaultMetaOnSync(rootFolderId, folderId);
+			}
 
 			new Notice("Force pull complete!");
 			this.debugLog("Force pull complete");
@@ -1049,8 +2028,14 @@ export default class SyncDrivePlugin extends Plugin {
 		this.settings.refreshToken = '';
 		this.settings.userName = '';
 		this.settings.remoteFolderId = '';
+		this.settings.currentVaultId = '';
 		await this.saveSettings();
 		this.gdrive.setTokens('', '');
+		this.vaultsMetaCache = null;
+		this.vaultsMetaFileId = null;
+		this.vaultsMetaRootId = null;
+		this.vaultsMetaVersion = null;
+		this.resetVaultScopedState();
 		new Notice("Logged out successfully.");
 		(this.app as any).setting.openTabById(this.manifest.id);
 	}
@@ -1149,6 +2134,8 @@ class SyncDriveSettingTab extends PluginSettingTab {
 			containerEl.createEl('p', { text: `Logged in as: ${this.plugin.settings.userName}`, cls: 'sync-drive-user-info' });
 		}
 
+		containerEl.createEl('h3', { text: 'Authentication' });
+
 		new Setting(containerEl)
 			.setName('Authentication')
 			.setDesc(this.plugin.settings.accessToken ? 'You are authenticated with Google Drive.' : 'Login with your Google account to sync notes.')
@@ -1163,91 +2150,10 @@ class SyncDriveSettingTab extends PluginSettingTab {
 						} else {
 							await this.plugin.authenticate();
 						}
-					});
-			});
-
-		new Setting(containerEl)
-			.setName('Debug logging')
-			.setDesc('Enable extra console logs to troubleshoot authentication and sync.')
-			.addToggle(toggle => {
-				toggle
-					.setValue(this.plugin.settings.debugLogging)
-					.onChange(async (value) => {
-						this.plugin.settings.debugLogging = value;
-						this.plugin.setDebugEnabled(value);
-						await this.plugin.saveSettings();
-						this.plugin.debugLog("Debug logging enabled");
-					});
-			});
-
-		new Setting(containerEl)
-			.setName('Auto sync')
-			.setDesc('Automatically sync on an interval.')
-			.addToggle(toggle => {
-				toggle
-					.setValue(this.plugin.settings.autoSyncEnabled)
-					.onChange(async (value) => {
-						this.plugin.settings.autoSyncEnabled = value;
-						await this.plugin.saveSettings();
-						this.display();
-					});
-			});
-
-		if (this.plugin.settings.autoSyncEnabled) {
-			new Setting(containerEl)
-				.setName('Auto sync interval')
-				.setDesc('How often to run auto sync.')
-				.addText(text => {
-					text
-						.setPlaceholder('5')
-						.setValue(String(this.plugin.settings.autoSyncIntervalValue))
-						.onChange(async (value) => {
-							const parsed = Number(value);
-							if (!Number.isFinite(parsed) || parsed <= 0) return;
-							this.plugin.settings.autoSyncIntervalValue = parsed;
-							await this.plugin.saveSettings();
 						});
-				})
-				.addDropdown(dropdown => {
-					dropdown
-						.addOption('minutes', 'Minutes')
-						.addOption('seconds', 'Seconds')
-						.setValue(this.plugin.settings.autoSyncIntervalUnit)
-						.onChange(async (value: string) => {
-							if (value !== 'seconds' && value !== 'minutes') return;
-							this.plugin.settings.autoSyncIntervalUnit = value;
-							await this.plugin.saveSettings();
-						});
-				});
-		}
-
-		new Setting(containerEl)
-			.setName('Manual sync')
-			.setDesc('Run sync actions on demand.')
-			.addButton(button => {
-				button
-					.setButtonText('Sync now')
-					.setCta()
-					.onClick(async () => {
-						await this.plugin.sync();
-					});
-			})
-			.addButton(button => {
-				button
-					.setButtonText('Force push')
-					.onClick(async () => {
-						await this.plugin.forcePush();
-					});
-			})
-			.addButton(button => {
-				button
-					.setButtonText('Force pull')
-					.onClick(async () => {
-						await this.plugin.forcePull();
-					});
 			});
 
-		if (this.plugin.settings.debugLogging) {
+		if (this.plugin.isDebugEnabled()) {
 			new Setting(containerEl)
 				.setName('Force token refresh')
 				.setDesc('Refresh the access token using the stored refresh token.')
@@ -1259,5 +2165,299 @@ class SyncDriveSettingTab extends PluginSettingTab {
 						});
 				});
 		}
+
+		if (this.plugin.settings.accessToken) {
+			containerEl.createEl('h3', { text: 'Vault' });
+
+			const vaults = this.plugin.getVaultOptions();
+			const suggestedVaultName = this.plugin.getSuggestedVaultName();
+			const currentVault = this.plugin.settings.currentVaultId
+				? vaults.find(vault => vault.id === this.plugin.settings.currentVaultId)
+				: null;
+			const displayVaultName = currentVault?.name || suggestedVaultName;
+			const currentVaultLabel = this.plugin.settings.currentVaultId
+				? displayVaultName
+				: `${displayVaultName} (not selected)`;
+			// containerEl.createEl('p', { text: `Current vault: ${currentVaultLabel}`, cls: 'sync-drive-user-info' });
+
+			new Setting(containerEl)
+				.setName('Vault name')
+				.setDesc('Name to use when creating or selecting a vault.')
+				.addText(text => {
+					const inputEl = text.inputEl;
+					const iconButton = document.createElement('button');
+					iconButton.type = 'button';
+					iconButton.className = 'clickable-icon sync-drive-vault-picker';
+					iconButton.setAttribute('aria-label', 'Select vault');
+					iconButton.setAttribute('title', 'Select vault');
+					setIcon(iconButton, 'settings');
+					const inputParent = inputEl.parentElement;
+					if (inputParent) {
+						inputParent.insertBefore(iconButton, inputEl);
+					}
+					iconButton.addEventListener('click', async (event) => {
+						if (iconButton.dataset.loading === 'true') {
+							return;
+						}
+						iconButton.dataset.loading = 'true';
+						iconButton.disabled = true;
+
+						const loadingMenu = new ObsidianMenu();
+						loadingMenu.addItem(item => item.setTitle('Loading vaults...').setDisabled(true));
+						loadingMenu.showAtMouseEvent(event as MouseEvent);
+
+						try {
+							await this.plugin.refreshVaultList();
+							const availableVaults = this.plugin.getVaultOptions();
+							loadingMenu.close();
+
+							const menu = new ObsidianMenu();
+							if (availableVaults.length === 0) {
+								menu.addItem(item => item.setTitle('No vaults found').setDisabled(true));
+							} else {
+								for (const vault of availableVaults) {
+									menu.addItem(item => {
+										item.setTitle(vault.name);
+										if (vault.id === this.plugin.settings.currentVaultId) {
+											item.setIcon('check');
+										}
+										item.onClick(async () => {
+											await this.plugin.applyVaultSelectionById(vault.id);
+											this.display();
+										});
+									});
+								}
+							}
+							menu.showAtMouseEvent(event as MouseEvent);
+						} finally {
+							iconButton.dataset.loading = 'false';
+							iconButton.disabled = false;
+						}
+					});
+
+					text
+						.setPlaceholder(suggestedVaultName)
+						.setValue(this.plugin.settings.currentVaultName || suggestedVaultName)
+						.onChange(async (value) => {
+							this.plugin.settings.currentVaultName = value.trim();
+							this.plugin.settings.currentVaultId = '';
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName('Encryption key')
+				.setDesc('Encrypt files before upload and decrypt after download. Leave blank to disable. If you change this key, run a force push so all files are encrypted with the same key.')
+				.addText(text => {
+					text.inputEl.type = 'password';
+					text
+						.setPlaceholder('Leave blank to disable')
+						.setValue(this.plugin.settings.encryptionKey)
+						.onChange(async (value) => {
+							this.plugin.settings.encryptionKey = value;
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName('Manual sync')
+				.setDesc('Run sync actions on demand.')
+				.addButton(button => {
+					button
+						.setButtonText('Sync now')
+						.setCta()
+						.onClick(async () => {
+							await this.plugin.sync();
+						});
+				})
+				.addButton(button => {
+					button
+						.setButtonText('Force push')
+						.onClick(async () => {
+							await this.plugin.forcePush();
+						});
+				})
+				.addButton(button => {
+					button
+						.setButtonText('Force pull')
+						.onClick(async () => {
+							await this.plugin.forcePull();
+						});
+				});
+		}
+
+		let autoSyncInputEl: HTMLInputElement | null = null;
+		let autoSyncDropdownEl: HTMLSelectElement | null = null;
+		const setAutoSyncControlsEnabled = (enabled: boolean) => {
+			if (autoSyncInputEl) autoSyncInputEl.disabled = !enabled;
+			if (autoSyncDropdownEl) autoSyncDropdownEl.disabled = !enabled;
+		};
+
+		new Setting(containerEl)
+			.setName('Auto sync')
+			.setDesc('Automatically sync on an interval.')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.autoSyncEnabled)
+					.onChange(async (value) => {
+						this.plugin.settings.autoSyncEnabled = value;
+						await this.plugin.saveSettings();
+						setAutoSyncControlsEnabled(value);
+					});
+			})
+			.addText(text => {
+				autoSyncInputEl = text.inputEl;
+				text
+					.setPlaceholder('5')
+					.setValue(String(this.plugin.settings.autoSyncIntervalValue))
+					.onChange(async (value) => {
+						const parsed = Number(value);
+						if (!Number.isFinite(parsed) || parsed <= 0) return;
+						this.plugin.settings.autoSyncIntervalValue = parsed;
+						await this.plugin.saveSettings();
+					});
+				setAutoSyncControlsEnabled(this.plugin.settings.autoSyncEnabled);
+			})
+			.addDropdown(dropdown => {
+				autoSyncDropdownEl = dropdown.selectEl;
+				dropdown
+					.addOption('minutes', 'Minutes')
+					.addOption('seconds', 'Seconds')
+					.setValue(this.plugin.settings.autoSyncIntervalUnit)
+					.onChange(async (value: string) => {
+						if (value !== 'seconds' && value !== 'minutes') return;
+						this.plugin.settings.autoSyncIntervalUnit = value;
+						await this.plugin.saveSettings();
+					});
+				setAutoSyncControlsEnabled(this.plugin.settings.autoSyncEnabled);
+			});
+
+		containerEl.createEl('h3', { text: 'Selective Sync' });
+
+		new Setting(containerEl)
+			.setName('Sync images')
+			.setDesc('Include image files (png, jpg, gif, svg, etc).')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncImages)
+					.onChange(async (value) => {
+						this.plugin.settings.syncImages = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Sync audio')
+			.setDesc('Include audio files (mp3, wav, m4a, etc).')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncAudio)
+					.onChange(async (value) => {
+						this.plugin.settings.syncAudio = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Sync videos')
+			.setDesc('Include video files (mp4, mov, mkv, etc).')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncVideos)
+					.onChange(async (value) => {
+						this.plugin.settings.syncVideos = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Sync PDFs')
+			.setDesc('Include PDF files.')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncPdfs)
+					.onChange(async (value) => {
+						this.plugin.settings.syncPdfs = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Excluded folders')
+			.setDesc('Comma or newline separated folder paths to skip (relative to the vault).')
+			.addTextArea(text => {
+				text
+					.setPlaceholder('Templates/\nArchive/')
+					.setValue(this.plugin.settings.excludedFolders)
+					.onChange(async (value) => {
+						this.plugin.settings.excludedFolders = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Exclude patterns')
+			.setDesc('Glob patterns or regex (wrap regex with /.../).')
+			.addTextArea(text => {
+				text
+					.setPlaceholder('*.log\n/.*\\/drafts\\/.*/')
+					.setValue(this.plugin.settings.excludedPatterns)
+					.onChange(async (value) => {
+						this.plugin.settings.excludedPatterns = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+
+		containerEl.createEl('h3', { text: 'Settings Sync' });
+
+		new Setting(containerEl)
+			.setName('Appearance settings')
+			.setDesc('Sync dark mode, theme, and enabled snippets.')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncAppearanceSettings)
+					.onChange(async (value) => {
+						this.plugin.settings.syncAppearanceSettings = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Themes and snippets')
+			.setDesc('Sync themes folder and snippets folder.')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncThemesAndSnippets)
+					.onChange(async (value) => {
+						this.plugin.settings.syncThemesAndSnippets = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Plugins')
+			.setDesc('Sync plugins except Sync Drive itself.')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncPlugins)
+					.onChange(async (value) => {
+						this.plugin.settings.syncPlugins = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Hotkeys')
+			.setDesc('Sync custom hotkey mappings.')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncHotkeys)
+					.onChange(async (value) => {
+						this.plugin.settings.syncHotkeys = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
 	}
 }
