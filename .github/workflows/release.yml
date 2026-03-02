@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact version to release (X.Y.Z). Leave blank to use bump."
+        required: false
+      bump:
+        description: "Semver bump if version is not provided."
+        required: false
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - id: bump
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION=$(node scripts/bump-version.mjs --version "${{ inputs.version }}")
+          else
+            VERSION=$(node scripts/bump-version.mjs --bump "${{ inputs.bump }}")
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      - run: npm run package
+      - name: Create release zip
+        run: |
+          ZIP_NAME="sync-drive-${{ steps.bump.outputs.version }}.zip"
+          zip -j "$ZIP_NAME" dist/sync-drive/main.js dist/sync-drive/manifest.json dist/sync-drive/styles.css
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json manifest.json
+          git commit -m "chore(release): v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push
+          git push --tags
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.bump.outputs.version }}"
+          name: "v${{ steps.bump.outputs.version }}"
+          files: |
+            dist/sync-drive/main.js
+            dist/sync-drive/manifest.json
+            dist/sync-drive/styles.css
+            sync-drive-${{ steps.bump.outputs.version }}.zip

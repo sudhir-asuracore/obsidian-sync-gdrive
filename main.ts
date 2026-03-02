@@ -1,6 +1,179 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl, TFile, Platform, ObsidianProtocolData, Menu as ObsidianMenu, setIcon } from 'obsidian';
-import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, randomBytes } from 'crypto';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl, TFile, ObsidianProtocolData, Menu as ObsidianMenu, setIcon } from 'obsidian';
 import { GDriveHelper } from './src/gdrive';
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder('utf-8');
+const BASE64_CHUNK_SIZE = 0x8000;
+
+const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+	const bytes = new Uint8Array(buffer);
+	let binary = '';
+	for (let i = 0; i < bytes.length; i += BASE64_CHUNK_SIZE) {
+		const chunk = bytes.subarray(i, i + BASE64_CHUNK_SIZE);
+		binary += String.fromCharCode(...chunk);
+	}
+	if (typeof btoa === 'function') {
+		return btoa(binary);
+	}
+	if (typeof Buffer !== 'undefined') {
+		return Buffer.from(bytes).toString('base64');
+	}
+	throw new Error('Base64 encoding not available');
+};
+
+const base64ToArrayBuffer = (base64: string): ArrayBuffer => {
+	if (typeof atob === 'function') {
+		const binary = atob(base64);
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) {
+			bytes[i] = binary.charCodeAt(i);
+		}
+		return bytes.buffer;
+	}
+	if (typeof Buffer !== 'undefined') {
+		return Uint8Array.from(Buffer.from(base64, 'base64')).buffer;
+	}
+	throw new Error('Base64 decoding not available');
+};
+
+const safeAdd = (x: number, y: number): number => {
+	const lsw = (x & 0xffff) + (y & 0xffff);
+	const msw = (x >> 16) + (y >> 16) + (lsw >> 16);
+	return (msw << 16) | (lsw & 0xffff);
+};
+
+const bitRotateLeft = (num: number, cnt: number): number => {
+	return (num << cnt) | (num >>> (32 - cnt));
+};
+
+const md5Cmn = (q: number, a: number, b: number, x: number, s: number, t: number): number => {
+	return safeAdd(bitRotateLeft(safeAdd(safeAdd(a, q), safeAdd(x, t)), s), b);
+};
+
+const md5Ff = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
+	return md5Cmn((b & c) | (~b & d), a, b, x, s, t);
+};
+
+const md5Gg = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
+	return md5Cmn((b & d) | (c & ~d), a, b, x, s, t);
+};
+
+const md5Hh = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
+	return md5Cmn(b ^ c ^ d, a, b, x, s, t);
+};
+
+const md5Ii = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
+	return md5Cmn(c ^ (b | ~d), a, b, x, s, t);
+};
+
+const md5Bytes = (bytes: Uint8Array): string => {
+	const x: number[] = [];
+	for (let i = 0; i < bytes.length; i++) {
+		x[i >> 2] |= bytes[i] << ((i % 4) * 8);
+	}
+	const bitLen = bytes.length * 8;
+	x[bitLen >> 5] |= 0x80 << (bitLen % 32);
+	x[(((bitLen + 64) >>> 9) << 4) + 14] = bitLen;
+
+	let a = 1732584193;
+	let b = -271733879;
+	let c = -1732584194;
+	let d = 271733878;
+
+	for (let i = 0; i < x.length; i += 16) {
+		const oldA = a;
+		const oldB = b;
+		const oldC = c;
+		const oldD = d;
+
+		a = md5Ff(a, b, c, d, x[i + 0], 7, -680876936);
+		d = md5Ff(d, a, b, c, x[i + 1], 12, -389564586);
+		c = md5Ff(c, d, a, b, x[i + 2], 17, 606105819);
+		b = md5Ff(b, c, d, a, x[i + 3], 22, -1044525330);
+		a = md5Ff(a, b, c, d, x[i + 4], 7, -176418897);
+		d = md5Ff(d, a, b, c, x[i + 5], 12, 1200080426);
+		c = md5Ff(c, d, a, b, x[i + 6], 17, -1473231341);
+		b = md5Ff(b, c, d, a, x[i + 7], 22, -45705983);
+		a = md5Ff(a, b, c, d, x[i + 8], 7, 1770035416);
+		d = md5Ff(d, a, b, c, x[i + 9], 12, -1958414417);
+		c = md5Ff(c, d, a, b, x[i + 10], 17, -42063);
+		b = md5Ff(b, c, d, a, x[i + 11], 22, -1990404162);
+		a = md5Ff(a, b, c, d, x[i + 12], 7, 1804603682);
+		d = md5Ff(d, a, b, c, x[i + 13], 12, -40341101);
+		c = md5Ff(c, d, a, b, x[i + 14], 17, -1502002290);
+		b = md5Ff(b, c, d, a, x[i + 15], 22, 1236535329);
+
+		a = md5Gg(a, b, c, d, x[i + 1], 5, -165796510);
+		d = md5Gg(d, a, b, c, x[i + 6], 9, -1069501632);
+		c = md5Gg(c, d, a, b, x[i + 11], 14, 643717713);
+		b = md5Gg(b, c, d, a, x[i + 0], 20, -373897302);
+		a = md5Gg(a, b, c, d, x[i + 5], 5, -701558691);
+		d = md5Gg(d, a, b, c, x[i + 10], 9, 38016083);
+		c = md5Gg(c, d, a, b, x[i + 15], 14, -660478335);
+		b = md5Gg(b, c, d, a, x[i + 4], 20, -405537848);
+		a = md5Gg(a, b, c, d, x[i + 9], 5, 568446438);
+		d = md5Gg(d, a, b, c, x[i + 14], 9, -1019803690);
+		c = md5Gg(c, d, a, b, x[i + 3], 14, -187363961);
+		b = md5Gg(b, c, d, a, x[i + 8], 20, 1163531501);
+		a = md5Gg(a, b, c, d, x[i + 13], 5, -1444681467);
+		d = md5Gg(d, a, b, c, x[i + 2], 9, -51403784);
+		c = md5Gg(c, d, a, b, x[i + 7], 14, 1735328473);
+		b = md5Gg(b, c, d, a, x[i + 12], 20, -1926607734);
+
+		a = md5Hh(a, b, c, d, x[i + 5], 4, -378558);
+		d = md5Hh(d, a, b, c, x[i + 8], 11, -2022574463);
+		c = md5Hh(c, d, a, b, x[i + 11], 16, 1839030562);
+		b = md5Hh(b, c, d, a, x[i + 14], 23, -35309556);
+		a = md5Hh(a, b, c, d, x[i + 1], 4, -1530992060);
+		d = md5Hh(d, a, b, c, x[i + 4], 11, 1272893353);
+		c = md5Hh(c, d, a, b, x[i + 7], 16, -155497632);
+		b = md5Hh(b, c, d, a, x[i + 10], 23, -1094730640);
+		a = md5Hh(a, b, c, d, x[i + 13], 4, 681279174);
+		d = md5Hh(d, a, b, c, x[i + 0], 11, -358537222);
+		c = md5Hh(c, d, a, b, x[i + 3], 16, -722521979);
+		b = md5Hh(b, c, d, a, x[i + 6], 23, 76029189);
+		a = md5Hh(a, b, c, d, x[i + 9], 4, -640364487);
+		d = md5Hh(d, a, b, c, x[i + 12], 11, -421815835);
+		c = md5Hh(c, d, a, b, x[i + 15], 16, 530742520);
+		b = md5Hh(b, c, d, a, x[i + 2], 23, -995338651);
+
+		a = md5Ii(a, b, c, d, x[i + 0], 6, -198630844);
+		d = md5Ii(d, a, b, c, x[i + 7], 10, 1126891415);
+		c = md5Ii(c, d, a, b, x[i + 14], 15, -1416354905);
+		b = md5Ii(b, c, d, a, x[i + 5], 21, -57434055);
+		a = md5Ii(a, b, c, d, x[i + 12], 6, 1700485571);
+		d = md5Ii(d, a, b, c, x[i + 3], 10, -1894986606);
+		c = md5Ii(c, d, a, b, x[i + 10], 15, -1051523);
+		b = md5Ii(b, c, d, a, x[i + 1], 21, -2054922799);
+		a = md5Ii(a, b, c, d, x[i + 8], 6, 1873313359);
+		d = md5Ii(d, a, b, c, x[i + 15], 10, -30611744);
+		c = md5Ii(c, d, a, b, x[i + 6], 15, -1560198380);
+		b = md5Ii(b, c, d, a, x[i + 13], 21, 1309151649);
+		a = md5Ii(a, b, c, d, x[i + 4], 6, -145523070);
+		d = md5Ii(d, a, b, c, x[i + 11], 10, -1120210379);
+		c = md5Ii(c, d, a, b, x[i + 2], 15, 718787259);
+		b = md5Ii(b, c, d, a, x[i + 9], 21, -343485551);
+
+		a = safeAdd(a, oldA);
+		b = safeAdd(b, oldB);
+		c = safeAdd(c, oldC);
+		d = safeAdd(d, oldD);
+	}
+
+	const toHex = (num: number): string => {
+		let hex = '';
+		for (let i = 0; i < 4; i++) {
+			const byte = (num >> (i * 8)) & 0xff;
+			hex += (byte + 0x100).toString(16).slice(1);
+		}
+		return hex;
+	};
+
+	return `${toHex(a)}${toHex(b)}${toHex(c)}${toHex(d)}`;
+};
+
+const md5String = (value: string): string => md5Bytes(textEncoder.encode(value));
+const md5ArrayBuffer = (buffer: ArrayBuffer): string => md5Bytes(new Uint8Array(buffer));
 
 interface SyncDriveSettings {
 	accessToken: string;
@@ -60,7 +233,7 @@ const APPEARANCE_SETTING_FILES = new Set([
 	'appearance.json',
 	'snippets.json'
 ]);
-const ENCRYPTION_MAGIC = Buffer.from('SDENC1');
+const ENCRYPTION_MAGIC = textEncoder.encode('SDENC1');
 const ENCRYPTION_TESTER_TEXT = 'encrypt_tester';
 const ENCRYPTION_SALT_BYTES = 16;
 const ENCRYPTION_IV_BYTES = 12;
@@ -138,11 +311,15 @@ interface SyncDiff {
 	conflicts: string[];
 }
 
+type SyncActionType = 'sync' | 'forcePush' | 'forcePull';
+
 export default class SyncDrivePlugin extends Plugin {
 	settings!: SyncDriveSettings;
 	gdrive!: GDriveHelper;
 	private debugEnabled = false;
 	private syncInProgress = false;
+	private syncActionType: SyncActionType | null = null;
+	private syncActionListener: ((inProgress: boolean, action: SyncActionType | null) => void) | null = null;
 	private ribbonIconEl: HTMLElement | null = null;
 	private autoSyncTimer: number | null = null;
 	private deltaDirtyPaths = new Set<string>();
@@ -171,6 +348,41 @@ export default class SyncDrivePlugin extends Plugin {
 		return this.debugEnabled;
 	}
 
+	setSyncActionStateListener(listener: ((inProgress: boolean, action: SyncActionType | null) => void) | null) {
+		this.syncActionListener = listener;
+	}
+
+	isSyncActionInProgress(): boolean {
+		return this.syncInProgress;
+	}
+
+	getSyncActionType(): SyncActionType | null {
+		return this.syncActionType;
+	}
+
+	private setSyncActionState(inProgress: boolean, action: SyncActionType | null) {
+		this.syncInProgress = inProgress;
+		this.syncActionType = action;
+		if (this.syncActionListener) {
+			this.syncActionListener(inProgress, action);
+		}
+	}
+
+	private tryBeginSyncAction(action: SyncActionType, trigger: 'manual' | 'auto' = 'manual'): boolean {
+		if (this.syncInProgress) {
+			if (trigger === 'manual') {
+				new Notice("Another sync operation is already in progress.");
+			}
+			return false;
+		}
+		this.setSyncActionState(true, action);
+		return true;
+	}
+
+	private endSyncAction() {
+		this.setSyncActionState(false, null);
+	}
+
 	private getDebugLoggingFromEnv(): boolean {
 		const raw = String(process.env.SYNC_DRIVE_DEBUG_LOGGING || '').trim().toLowerCase();
 		if (!raw) return false;
@@ -195,31 +407,72 @@ export default class SyncDrivePlugin extends Plugin {
 		return copy.buffer;
 	}
 
-	private bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
-		return this.toArrayBuffer(new Uint8Array(buffer));
+	private getWebCrypto(): Crypto {
+		if (globalThis.crypto && globalThis.crypto.subtle) {
+			return globalThis.crypto;
+		}
+		throw new Error('WebCrypto is not available in this environment.');
 	}
 
-	private encryptContentWithKey(data: ArrayBuffer, key: string): ArrayBuffer {
-		const salt = randomBytes(ENCRYPTION_SALT_BYTES);
-		const iv = randomBytes(ENCRYPTION_IV_BYTES);
-		const derived = pbkdf2Sync(key, salt, ENCRYPTION_ITERATIONS, 32, 'sha256');
-		const cipher = createCipheriv('aes-256-gcm', derived, iv);
-		const ciphertext = Buffer.concat([
-			cipher.update(Buffer.from(data)),
-			cipher.final()
-		]);
-		const tag = cipher.getAuthTag();
-		const payload = Buffer.concat([ENCRYPTION_MAGIC, salt, iv, tag, ciphertext]);
-		return this.bufferToArrayBuffer(payload);
+	private randomBytes(size: number): Uint8Array {
+		const bytes = new Uint8Array(size);
+		this.getWebCrypto().getRandomValues(bytes);
+		return bytes;
 	}
 
-	private decryptContentWithKey(data: ArrayBuffer, key: string): ArrayBuffer {
-		const payload = Buffer.from(data);
+	private async deriveEncryptionKey(key: string, salt: Uint8Array): Promise<CryptoKey> {
+		const crypto = this.getWebCrypto();
+		const baseKey = await crypto.subtle.importKey(
+			'raw',
+			textEncoder.encode(key),
+			'PBKDF2',
+			false,
+			['deriveKey']
+		);
+		const saltBuffer = this.toArrayBuffer(salt);
+		return crypto.subtle.deriveKey(
+			{ name: 'PBKDF2', salt: saltBuffer, iterations: ENCRYPTION_ITERATIONS, hash: 'SHA-256' },
+			baseKey,
+			{ name: 'AES-GCM', length: 256 },
+			false,
+			['encrypt', 'decrypt']
+		);
+	}
+
+	private async encryptContentWithKey(data: ArrayBuffer, key: string): Promise<ArrayBuffer> {
+		const crypto = this.getWebCrypto();
+		const salt = this.randomBytes(ENCRYPTION_SALT_BYTES);
+		const iv = this.randomBytes(ENCRYPTION_IV_BYTES);
+		const derived = await this.deriveEncryptionKey(key, salt);
+		const ivBuffer = this.toArrayBuffer(iv);
+		const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: ivBuffer }, derived, data);
+		const encryptedBytes = new Uint8Array(encrypted);
+		const tag = encryptedBytes.slice(encryptedBytes.length - ENCRYPTION_TAG_BYTES);
+		const ciphertext = encryptedBytes.slice(0, encryptedBytes.length - ENCRYPTION_TAG_BYTES);
+		const payload = new Uint8Array(
+			ENCRYPTION_MAGIC.length + ENCRYPTION_SALT_BYTES + ENCRYPTION_IV_BYTES + ENCRYPTION_TAG_BYTES + ciphertext.length
+		);
+		let offset = 0;
+		payload.set(ENCRYPTION_MAGIC, offset);
+		offset += ENCRYPTION_MAGIC.length;
+		payload.set(salt, offset);
+		offset += ENCRYPTION_SALT_BYTES;
+		payload.set(iv, offset);
+		offset += ENCRYPTION_IV_BYTES;
+		payload.set(tag, offset);
+		offset += ENCRYPTION_TAG_BYTES;
+		payload.set(ciphertext, offset);
+		return this.toArrayBuffer(payload);
+	}
+
+	private async decryptContentWithKey(data: ArrayBuffer, key: string): Promise<ArrayBuffer> {
+		const payload = new Uint8Array(data);
 		const headerSize = ENCRYPTION_MAGIC.length + ENCRYPTION_SALT_BYTES + ENCRYPTION_IV_BYTES + ENCRYPTION_TAG_BYTES;
 		if (payload.length <= headerSize) {
 			throw new Error(this.getEncryptionMismatchMessage());
 		}
-		if (!payload.subarray(0, ENCRYPTION_MAGIC.length).equals(ENCRYPTION_MAGIC)) {
+		const magic = payload.subarray(0, ENCRYPTION_MAGIC.length);
+		if (magic.length !== ENCRYPTION_MAGIC.length || !magic.every((value, index) => value === ENCRYPTION_MAGIC[index])) {
 			throw new Error(this.getEncryptionMismatchMessage());
 		}
 		let offset = ENCRYPTION_MAGIC.length;
@@ -230,50 +483,49 @@ export default class SyncDrivePlugin extends Plugin {
 		const tag = payload.subarray(offset, offset + ENCRYPTION_TAG_BYTES);
 		offset += ENCRYPTION_TAG_BYTES;
 		const ciphertext = payload.subarray(offset);
-		const derived = pbkdf2Sync(key, salt, ENCRYPTION_ITERATIONS, 32, 'sha256');
-		const decipher = createDecipheriv('aes-256-gcm', derived, iv);
-		decipher.setAuthTag(tag);
-		const plaintext = Buffer.concat([
-			decipher.update(ciphertext),
-			decipher.final()
-		]);
-		return this.bufferToArrayBuffer(plaintext);
+		const combined = new Uint8Array(ciphertext.length + tag.length);
+		combined.set(ciphertext, 0);
+		combined.set(tag, ciphertext.length);
+		const crypto = this.getWebCrypto();
+		const derived = await this.deriveEncryptionKey(key, salt);
+		const ivBuffer = this.toArrayBuffer(iv);
+		const combinedBuffer = this.toArrayBuffer(combined);
+		return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuffer }, derived, combinedBuffer);
 	}
 
-	private encryptContent(data: ArrayBuffer): ArrayBuffer {
+	private async encryptContent(data: ArrayBuffer): Promise<ArrayBuffer> {
 		const key = this.getEncryptionKey();
 		if (!key) return data;
-		return this.encryptContentWithKey(data, key);
+		return await this.encryptContentWithKey(data, key);
 	}
 
-	private decryptContent(data: ArrayBuffer): ArrayBuffer {
+	private async decryptContent(data: ArrayBuffer): Promise<ArrayBuffer> {
 		const key = this.getEncryptionKey();
 		if (!key) return data;
-		return this.decryptContentWithKey(data, key);
+		return await this.decryptContentWithKey(data, key);
 	}
 
-	private decryptContentOrThrow(data: ArrayBuffer): ArrayBuffer {
+	private async decryptContentOrThrow(data: ArrayBuffer): Promise<ArrayBuffer> {
 		if (!this.isEncryptionEnabled()) return data;
 		try {
-			return this.decryptContent(data);
+			return await this.decryptContent(data);
 		} catch (e) {
 			throw new Error(this.getEncryptionMismatchMessage());
 		}
 	}
 
-	private buildEncryptionTester(): string {
-		const encoder = new TextEncoder();
-		const raw = encoder.encode(ENCRYPTION_TESTER_TEXT);
-		const encrypted = this.encryptContentWithKey(raw.buffer, this.getEncryptionKey());
-		return Buffer.from(encrypted).toString('base64');
+	private async buildEncryptionTester(): Promise<string> {
+		const raw = textEncoder.encode(ENCRYPTION_TESTER_TEXT);
+		const encrypted = await this.encryptContentWithKey(raw.buffer, this.getEncryptionKey());
+		return arrayBufferToBase64(encrypted);
 	}
 
-	private applyEncryptionTester(metadata: RemoteMetadataFile): RemoteMetadataFile {
-		metadata.encrypt_tester = this.buildEncryptionTester();
+	private async applyEncryptionTester(metadata: RemoteMetadataFile): Promise<RemoteMetadataFile> {
+		metadata.encrypt_tester = await this.buildEncryptionTester();
 		return metadata;
 	}
 
-	private verifyEncryptionTester(metadata: RemoteMetadataFile): void {
+	private async verifyEncryptionTester(metadata: RemoteMetadataFile): Promise<void> {
 		const tester = metadata.encrypt_tester;
 		if (!tester) {
 			if (this.isEncryptionEnabled()) {
@@ -283,9 +535,9 @@ export default class SyncDrivePlugin extends Plugin {
 		}
 
 		try {
-			const decoded = Buffer.from(tester, 'base64');
-			const decrypted = this.decryptContentWithKey(this.bufferToArrayBuffer(decoded), this.getEncryptionKey());
-			const text = new TextDecoder('utf-8').decode(new Uint8Array(decrypted));
+			const decoded = base64ToArrayBuffer(tester);
+			const decrypted = await this.decryptContentWithKey(decoded, this.getEncryptionKey());
+			const text = textDecoder.decode(new Uint8Array(decrypted));
 			if (text !== ENCRYPTION_TESTER_TEXT) {
 				throw new Error(this.getEncryptionMismatchMessage());
 			}
@@ -294,17 +546,17 @@ export default class SyncDrivePlugin extends Plugin {
 		}
 	}
 
-	private async readLocalFileForUpload(path: string, localFile: TFile | null): Promise<string | ArrayBuffer> {
+	private async readLocalFileForUpload(path: string, localFile: TFile | null): Promise<ArrayBuffer> {
 		if (this.isEncryptionEnabled()) {
 			const content = localFile instanceof TFile
 				? await this.app.vault.readBinary(localFile)
 				: await this.app.vault.adapter.readBinary(path);
-			return this.encryptContent(content);
+			return await this.encryptContent(content);
 		}
 
 		return localFile instanceof TFile
-			? await this.app.vault.read(localFile)
-			: await this.app.vault.adapter.read(path);
+			? await this.app.vault.readBinary(localFile)
+			: await this.app.vault.adapter.readBinary(path);
 	}
 
 	private getLocalVaultName(): string {
@@ -322,7 +574,7 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private computeStringHash(value: string): string {
-		return createHash('md5').update(value).digest('hex');
+		return md5String(value);
 	}
 
 	private getRootScopedFileName(baseName: string, rootFolderId: string): string {
@@ -822,7 +1074,7 @@ export default class SyncDrivePlugin extends Plugin {
 
 		const version = metaFile.version ? String(metaFile.version) : null;
 		const data = await this.gdrive.downloadFile(metaFile.id);
-		const raw = new TextDecoder('utf-8').decode(data);
+		const raw = textDecoder.decode(data);
 		try {
 			const parsed = JSON.parse(raw);
 			if (parsed && parsed.schemaVersion === 1 && Array.isArray(parsed.vaults)) {
@@ -999,10 +1251,13 @@ export default class SyncDrivePlugin extends Plugin {
 		await this.saveVaultsMeta(rootFolderId, meta);
 	}
 
-	private async loadRemoteMetadata(folderId: string): Promise<{ metadata: RemoteMetadataFile | null; fileId: string | null; version: string | null }> {
+	private async loadRemoteMetadata(
+		folderId: string,
+		options?: { skipEncryptionTester?: boolean }
+	): Promise<{ metadata: RemoteMetadataFile | null; fileId: string | null; version: string | null; etag: string | null }> {
 		const metadataFiles = await this.gdrive.findFilesByName(folderId, METADATA_FILE_NAME);
 		if (metadataFiles.length === 0) {
-			return { metadata: null, fileId: null, version: null };
+			return { metadata: null, fileId: null, version: null, etag: null };
 		}
 
 		let metadataFile = metadataFiles[0];
@@ -1023,13 +1278,16 @@ export default class SyncDrivePlugin extends Plugin {
 		}
 
 		const version = metadataFile.version ? String(metadataFile.version) : null;
+		const etag = metadataFile.etag ? String(metadataFile.etag) : null;
 		const data = await this.gdrive.downloadFile(metadataFile.id);
-		const raw = new TextDecoder('utf-8').decode(data);
+		const raw = textDecoder.decode(data);
 		try {
 			const parsed = JSON.parse(raw);
 			if (parsed && parsed.schemaVersion === 1 && parsed.files) {
-				this.verifyEncryptionTester(parsed as RemoteMetadataFile);
-				return { metadata: parsed as RemoteMetadataFile, fileId: metadataFile.id, version: version };
+				if (!options?.skipEncryptionTester) {
+					await this.verifyEncryptionTester(parsed as RemoteMetadataFile);
+				}
+				return { metadata: parsed as RemoteMetadataFile, fileId: metadataFile.id, version: version, etag: etag };
 			}
 		} catch (e: any) {
 			if (e instanceof Error && e.message === this.getEncryptionMismatchMessage()) {
@@ -1038,7 +1296,7 @@ export default class SyncDrivePlugin extends Plugin {
 			console.warn("Failed to parse remote metadata; treating as missing", e);
 		}
 
-		return { metadata: null, fileId: metadataFile.id || null, version: version };
+		return { metadata: null, fileId: metadataFile.id || null, version: version, etag: etag };
 	}
 
 	private async buildRemoteMetadataFromDrive(folderId: string): Promise<RemoteMetadataFile> {
@@ -1067,13 +1325,11 @@ export default class SyncDrivePlugin extends Plugin {
 			lastSyncByDevice: this.settings.userName || 'unknown',
 			files: files
 		};
-		return this.applyEncryptionTester(metadata);
+		return await this.applyEncryptionTester(metadata);
 	}
 
 	private computeHash(content: ArrayBuffer): string {
-		const hash = createHash('md5');
-		hash.update(Buffer.from(content));
-		return hash.digest('hex');
+		return md5ArrayBuffer(content);
 	}
 
 	private async scanLocalFiles(hashCache: LocalHashCacheFile): Promise<{ files: Record<string, LocalFileState>; cache: LocalHashCacheFile }> {
@@ -1281,17 +1537,13 @@ export default class SyncDrivePlugin extends Plugin {
 		if (dot > 0) {
 			const base = originalPath.slice(0, dot);
 			const ext = originalPath.slice(dot);
-			return `${base} (conflicted copy)${ext}`;
+			return `${base} (conflict copy: local)${ext}`;
 		}
-		return `${originalPath} (conflicted copy)`;
+		return `${originalPath} (conflict copy: local)`;
 	}
 
 	async onload() {
 		await this.loadSettings();
-		if (!this.settings.currentVaultName) {
-			this.settings.currentVaultName = this.getLocalVaultName();
-			await this.saveSettings();
-		}
 		this.setDebugEnabled(this.getDebugLoggingFromEnv());
 
 		this.gdrive = new GDriveHelper(
@@ -1560,14 +1812,9 @@ export default class SyncDrivePlugin extends Plugin {
 			return;
 		}
 
-		if (this.syncInProgress) {
-			if (trigger === 'manual') {
-				new Notice("Sync already in progress.");
-			}
+		if (!this.tryBeginSyncAction('sync', trigger)) {
 			return;
 		}
-
-		this.syncInProgress = true;
 		this.setSyncingIndicator(true);
 		try {
 			this.debugLog("Sync started");
@@ -1616,10 +1863,11 @@ export default class SyncDrivePlugin extends Plugin {
 				Object.assign(localState, resetState);
 			}
 
-			const remoteMetaInfo = await this.loadRemoteMetadata(folderId);
+			const remoteMetaInfo = await this.loadRemoteMetadata(folderId, { skipEncryptionTester: true });
 			let remoteMetadata = remoteMetaInfo.metadata;
 			let metadataFileId = remoteMetaInfo.fileId;
 			const metadataVersion = remoteMetaInfo.version;
+			let metadataEtag = remoteMetaInfo.etag;
 
 			if (!remoteMetadata) {
 				this.debugLog("No remote metadata found, rebuilding from Drive listing");
@@ -1631,6 +1879,7 @@ export default class SyncDrivePlugin extends Plugin {
 					metadataFileId || undefined,
 					{ mimeType: 'application/json' }
 				);
+				metadataEtag = null;
 			}
 
 			const hashCache = await this.loadLocalHashCache();
@@ -1677,7 +1926,7 @@ export default class SyncDrivePlugin extends Plugin {
 				const remoteEntry = remoteMetadata.files[path];
 				if (!remoteEntry || remoteEntry.isDeleted || !remoteEntry.id) continue;
 				const content = await this.gdrive.downloadFile(remoteEntry.id);
-				const decrypted = this.decryptContentOrThrow(content);
+				const decrypted = await this.decryptContentOrThrow(content);
 				await this.ensureLocalFolderForPath(path);
 				const localFile = this.app.vault.getAbstractFileByPath(path);
 				if (localFile instanceof TFile) {
@@ -1729,7 +1978,6 @@ export default class SyncDrivePlugin extends Plugin {
 			for (const path of diff.toUpload) {
 				const localFile = this.app.vault.getAbstractFileByPath(path);
 				const content = await this.readLocalFileForUpload(path, localFile instanceof TFile ? localFile : null);
-				if (content === null) continue;
 				const remoteEntry = remoteMetadata.files[path];
 				const remoteId = remoteEntry && !remoteEntry.isDeleted ? remoteEntry.id : undefined;
 				const uploaded = await this.gdrive.uploadFileByPath(folderId, path, content, remoteId);
@@ -1756,7 +2004,7 @@ export default class SyncDrivePlugin extends Plugin {
 				remoteMetadata.lastSyncTimestamp = Date.now();
 				remoteMetadata.lastSyncByDevice = this.settings.userName || 'unknown';
 				remoteMetadata.rootFolderId = folderId;
-				this.applyEncryptionTester(remoteMetadata);
+				await this.applyEncryptionTester(remoteMetadata);
 			}
 
 			try {
@@ -1773,13 +2021,17 @@ export default class SyncDrivePlugin extends Plugin {
 						}
 					}
 
+					const uploadOptions = metadataEtag
+						? { mimeType: 'application/json', ifMatch: metadataEtag }
+						: { mimeType: 'application/json' };
 					metadataFileId = await this.gdrive.uploadFile(
 						METADATA_FILE_NAME,
 						JSON.stringify(remoteMetadata, null, 2),
 						folderId,
 						metadataFileId || undefined,
-						{ mimeType: 'application/json' }
+						uploadOptions
 					);
+					metadataEtag = null;
 				}
 			} catch (e: any) {
 				if (String(e.message || '').includes('412')) {
@@ -1804,7 +2056,7 @@ export default class SyncDrivePlugin extends Plugin {
 			new Notice(`Sync failed: ${e.message}`);
 			this.debugLog("Sync failed", e);
 		} finally {
-			this.syncInProgress = false;
+			this.endSyncAction();
 			this.setSyncingIndicator(false);
 			if (trigger === 'manual') {
 				this.resetAutoSyncTimer();
@@ -1818,15 +2070,22 @@ export default class SyncDrivePlugin extends Plugin {
 			return;
 		}
 
+		if (!this.tryBeginSyncAction('forcePush')) {
+			return;
+		}
+
 		try {
+			this.setSyncingIndicator(true);
 			this.debugLog("Force push started");
 			const folderId = await this.getVaultFolderId();
 			if (!folderId) return;
-			const remoteMetaInfo = await this.loadRemoteMetadata(folderId);
+			const remoteMetaInfo = await this.loadRemoteMetadata(folderId, { skipEncryptionTester: true });
 			let remoteMetadata = remoteMetaInfo.metadata;
 			const metadataFileId = remoteMetaInfo.fileId;
+			let metadataEtag = remoteMetaInfo.etag;
 			if (!remoteMetadata) {
 				remoteMetadata = await this.buildRemoteMetadataFromDrive(folderId);
+				metadataEtag = null;
 			}
 
 			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.gdrive.listFilesRecursive(folderId));
@@ -1841,7 +2100,7 @@ export default class SyncDrivePlugin extends Plugin {
 				}
 			}
 
-			console.log(folderId, remoteFiles.length, localPaths.length);
+			this.debugLog("Force push counts", { folderId, remote: remoteFiles.length, local: localPaths.length });
 
 			new Notice("Force pushing local to remote...");
 
@@ -1912,14 +2171,16 @@ export default class SyncDrivePlugin extends Plugin {
 				};
 			}
 
-			this.applyEncryptionTester(newMetadata);
-
+			await this.applyEncryptionTester(newMetadata);
+			const uploadOptions = metadataEtag
+				? { mimeType: 'application/json', ifMatch: metadataEtag }
+				: { mimeType: 'application/json' };
 			await this.gdrive.uploadFile(
 				METADATA_FILE_NAME,
 				JSON.stringify(newMetadata, null, 2),
 				folderId,
 				metadataFileId || undefined,
-				{ mimeType: 'application/json' }
+				uploadOptions
 			);
 
 			await this.saveLocalState(newMetadata);
@@ -1935,6 +2196,9 @@ export default class SyncDrivePlugin extends Plugin {
 		} catch (e: any) {
 			new Notice(`Force push failed: ${e.message}`);
 			this.debugLog("Force push failed", e);
+		} finally {
+			this.endSyncAction();
+			this.setSyncingIndicator(false);
 		}
 	}
 
@@ -1944,13 +2208,19 @@ export default class SyncDrivePlugin extends Plugin {
 			return;
 		}
 
+		if (!this.tryBeginSyncAction('forcePull')) {
+			return;
+		}
+
 		try {
+			this.setSyncingIndicator(true);
 			this.debugLog("Force pull started");
 			const folderId = await this.getVaultFolderId();
 			if (!folderId) return;
 
 			const remoteMetaInfo = await this.loadRemoteMetadata(folderId);
 			let metadataFileId = remoteMetaInfo.fileId;
+			let metadataEtag = remoteMetaInfo.etag;
 
 			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.gdrive.listFilesRecursive(folderId));
 			this.debugLog("Force pull remote count", remoteFiles.length);
@@ -1977,7 +2247,7 @@ export default class SyncDrivePlugin extends Plugin {
 				const remotePath = this.getRemoteFilePath(remoteFile);
 				if (!remotePath) continue;
 				const content = await this.gdrive.downloadFile(remoteFile.id);
-				const decrypted = this.decryptContentOrThrow(content);
+				const decrypted = await this.decryptContentOrThrow(content);
 				await this.ensureLocalFolderForPath(remotePath);
 				const localFile = this.app.vault.getAbstractFileByPath(remotePath);
 
@@ -1993,13 +2263,16 @@ export default class SyncDrivePlugin extends Plugin {
 			const newMetadata = await this.buildRemoteMetadataFromDrive(folderId);
 			newMetadata.lastSyncTimestamp = Date.now();
 			newMetadata.lastSyncByDevice = this.settings.userName || 'unknown';
-			this.applyEncryptionTester(newMetadata);
+			await this.applyEncryptionTester(newMetadata);
+			const uploadOptions = metadataEtag
+				? { mimeType: 'application/json', ifMatch: metadataEtag }
+				: { mimeType: 'application/json' };
 			await this.gdrive.uploadFile(
 				METADATA_FILE_NAME,
 				JSON.stringify(newMetadata, null, 2),
 				folderId,
 				metadataFileId || undefined,
-				{ mimeType: 'application/json' }
+				uploadOptions
 			);
 
 			const hashCache = await this.loadLocalHashCache();
@@ -2019,6 +2292,9 @@ export default class SyncDrivePlugin extends Plugin {
 		} catch (e: any) {
 			new Notice(`Force pull failed: ${e.message}`);
 			this.debugLog("Force pull failed", e);
+		} finally {
+			this.endSyncAction();
+			this.setSyncingIndicator(false);
 		}
 	}
 
@@ -2115,6 +2391,46 @@ class OAuthModal extends Modal {
 	}
 }
 
+class EncryptionKeyChangeModal extends Modal {
+	onConfirm: () => void;
+	onCancel: () => void;
+	private didResolve = false;
+
+	constructor(app: App, onConfirm: () => void, onCancel: () => void) {
+		super(app);
+		this.onConfirm = onConfirm;
+		this.onCancel = onCancel;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl("h2", { text: "Encryption key changed" });
+		contentEl.createEl("p", { text: "Changing the encryption key requires a force push to keep files consistent." });
+
+		const btnContainer = contentEl.createDiv({ cls: "sync-drive-modal-buttons" });
+		const forceBtn = btnContainer.createEl("button", { text: "Force Push", cls: "mod-cta" });
+		const cancelBtn = btnContainer.createEl("button", { text: "Cancel" });
+
+		forceBtn.onclick = () => {
+			this.didResolve = true;
+			this.close();
+			this.onConfirm();
+		};
+		cancelBtn.onclick = () => {
+			this.didResolve = true;
+			this.close();
+			this.onCancel();
+		};
+	}
+
+	onClose() {
+		if (!this.didResolve) {
+			this.onCancel();
+		}
+		this.contentEl.empty();
+	}
+}
+
 class SyncDriveSettingTab extends PluginSettingTab {
 	plugin: SyncDrivePlugin;
 
@@ -2127,14 +2443,97 @@ class SyncDriveSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 
 		containerEl.empty();
+		this.plugin.setSyncActionStateListener(null);
 
 		containerEl.createEl('h2', { text: 'Sync Drive Settings' });
 
-		if (this.plugin.settings.userName) {
-			containerEl.createEl('p', { text: `Logged in as: ${this.plugin.settings.userName}`, cls: 'sync-drive-user-info' });
-		}
+		const gateMessage = 'please select or type in a vault name.';
+		const gatedSettings: Setting[] = [];
+		let encryptionKeyInputEl: HTMLInputElement | null = null;
+		let encryptionKeyPromptOpen = false;
+		let pendingEncryptionKey: string | null = null;
+		let syncNowButtonEl: HTMLButtonElement | null = null;
+		let syncNowButtonText = 'Sync now';
+		let forcePushButtonEl: HTMLButtonElement | null = null;
+		let forcePushButtonText = 'Force push';
+		let forcePullButtonEl: HTMLButtonElement | null = null;
+		let forcePullButtonText = 'Force pull';
+		const hasVaultSelection = () => {
+			const trimmedName = (this.plugin.settings.currentVaultName || '').trim();
+			return trimmedName.length > 0 || !!this.plugin.settings.currentVaultId;
+		};
+		const registerVaultGate = (setting: Setting) => {
+			gatedSettings.push(setting);
+			return setting;
+		};
+		const setSyncActionButtonsEnabled = (enabled: boolean) => {
+			const canEnable = enabled && hasVaultSelection();
+			if (syncNowButtonEl) syncNowButtonEl.disabled = !canEnable;
+			if (forcePushButtonEl) forcePushButtonEl.disabled = !canEnable;
+			if (forcePullButtonEl) forcePullButtonEl.disabled = !canEnable;
+		};
+		const setActionButtonLoading = (
+			buttonEl: HTMLButtonElement | null,
+			loading: boolean,
+			loadingText: string,
+			defaultText: string
+		) => {
+			if (!buttonEl) return;
+			if (loading) {
+				buttonEl.dataset.loading = 'true';
+				buttonEl.classList.add('sync-drive-button-loading');
+				buttonEl.textContent = loadingText;
+				return;
+			}
+			buttonEl.dataset.loading = 'false';
+			buttonEl.classList.remove('sync-drive-button-loading');
+			buttonEl.textContent = defaultText;
+		};
+		const applySyncActionUiState = (inProgress: boolean, action: SyncActionType | null) => {
+			setSyncActionButtonsEnabled(!inProgress);
+			if (!inProgress) {
+				setActionButtonLoading(syncNowButtonEl, false, '', syncNowButtonText);
+				setActionButtonLoading(forcePushButtonEl, false, '', forcePushButtonText);
+				setActionButtonLoading(forcePullButtonEl, false, '', forcePullButtonText);
+				return;
+			}
+			setActionButtonLoading(syncNowButtonEl, action === 'sync', 'Syncing...', syncNowButtonText);
+			setActionButtonLoading(forcePushButtonEl, action === 'forcePush', 'Force pushing...', forcePushButtonText);
+			setActionButtonLoading(forcePullButtonEl, action === 'forcePull', 'Force pulling...', forcePullButtonText);
+		};
+		const maybePromptEncryptionKeyChange = () => {
+			if (encryptionKeyPromptOpen) return;
+			const current = this.plugin.settings.encryptionKey;
+			if (!encryptionKeyInputEl || !encryptionKeyInputEl.isConnected) return;
+			if (pendingEncryptionKey === null || pendingEncryptionKey === current) return;
+			encryptionKeyPromptOpen = true;
+			const nextValue = pendingEncryptionKey;
+			new EncryptionKeyChangeModal(
+				this.app,
+				async () => {
+					this.plugin.settings.encryptionKey = nextValue;
+					await this.plugin.saveSettings();
+					if (encryptionKeyInputEl) {
+						encryptionKeyInputEl.value = nextValue;
+					}
+					encryptionKeyPromptOpen = false;
+					await this.plugin.forcePush();
+				},
+				() => {
+					if (encryptionKeyInputEl) {
+						encryptionKeyInputEl.value = current;
+					}
+					pendingEncryptionKey = current;
+					encryptionKeyPromptOpen = false;
+				}
+			).open();
+		};
 
-		containerEl.createEl('h3', { text: 'Authentication' });
+		const authHeaderText = this.plugin.settings.userName
+			? `Authentication (Logged in as: ${this.plugin.settings.userName})`
+			: 'Authentication';
+
+		containerEl.createEl('h3', { text: authHeaderText });
 
 		new Setting(containerEl)
 			.setName('Authentication')
@@ -2237,29 +2636,33 @@ class SyncDriveSettingTab extends PluginSettingTab {
 
 					text
 						.setPlaceholder(suggestedVaultName)
-						.setValue(this.plugin.settings.currentVaultName || suggestedVaultName)
+						.setValue(this.plugin.settings.currentVaultName || '')
 						.onChange(async (value) => {
 							this.plugin.settings.currentVaultName = value.trim();
 							this.plugin.settings.currentVaultId = '';
 							await this.plugin.saveSettings();
+							applyVaultGate();
 						});
 				});
 
-			new Setting(containerEl)
+			registerVaultGate(new Setting(containerEl))
 				.setName('Encryption key')
 				.setDesc('Encrypt files before upload and decrypt after download. Leave blank to disable. If you change this key, run a force push so all files are encrypted with the same key.')
 				.addText(text => {
 					text.inputEl.type = 'password';
+					encryptionKeyInputEl = text.inputEl;
 					text
 						.setPlaceholder('Leave blank to disable')
 						.setValue(this.plugin.settings.encryptionKey)
 						.onChange(async (value) => {
-							this.plugin.settings.encryptionKey = value;
-							await this.plugin.saveSettings();
+							pendingEncryptionKey = value;
 						});
+					text.inputEl.addEventListener('blur', () => {
+						maybePromptEncryptionKeyChange();
+					});
 				});
 
-			new Setting(containerEl)
+			registerVaultGate(new Setting(containerEl))
 				.setName('Manual sync')
 				.setDesc('Run sync actions on demand.')
 				.addButton(button => {
@@ -2269,6 +2672,8 @@ class SyncDriveSettingTab extends PluginSettingTab {
 						.onClick(async () => {
 							await this.plugin.sync();
 						});
+					syncNowButtonEl = button.buttonEl;
+					syncNowButtonText = syncNowButtonEl.textContent || syncNowButtonText;
 				})
 				.addButton(button => {
 					button
@@ -2276,6 +2681,8 @@ class SyncDriveSettingTab extends PluginSettingTab {
 						.onClick(async () => {
 							await this.plugin.forcePush();
 						});
+					forcePushButtonEl = button.buttonEl;
+					forcePushButtonText = forcePushButtonEl.textContent || forcePushButtonText;
 				})
 				.addButton(button => {
 					button
@@ -2283,17 +2690,39 @@ class SyncDriveSettingTab extends PluginSettingTab {
 						.onClick(async () => {
 							await this.plugin.forcePull();
 						});
+					forcePullButtonEl = button.buttonEl;
+					forcePullButtonText = forcePullButtonEl.textContent || forcePullButtonText;
 				});
+
+			this.plugin.setSyncActionStateListener((inProgress, action) => {
+				if (syncNowButtonEl && !syncNowButtonEl.isConnected) return;
+				applySyncActionUiState(inProgress, action);
+			});
+			applySyncActionUiState(this.plugin.isSyncActionInProgress(), this.plugin.getSyncActionType());
 		}
 
 		let autoSyncInputEl: HTMLInputElement | null = null;
 		let autoSyncDropdownEl: HTMLSelectElement | null = null;
 		const setAutoSyncControlsEnabled = (enabled: boolean) => {
-			if (autoSyncInputEl) autoSyncInputEl.disabled = !enabled;
-			if (autoSyncDropdownEl) autoSyncDropdownEl.disabled = !enabled;
+			const canEnable = enabled && hasVaultSelection();
+			if (autoSyncInputEl) autoSyncInputEl.disabled = !canEnable;
+			if (autoSyncDropdownEl) autoSyncDropdownEl.disabled = !canEnable;
+		};
+		const applyVaultGate = () => {
+			const isEnabled = hasVaultSelection();
+			for (const setting of gatedSettings) {
+				setting.setDisabled(!isEnabled);
+				if (!isEnabled) {
+					setting.settingEl.setAttribute('title', gateMessage);
+				} else {
+					setting.settingEl.removeAttribute('title');
+				}
+			}
+			setAutoSyncControlsEnabled(this.plugin.settings.autoSyncEnabled);
+			applySyncActionUiState(this.plugin.isSyncActionInProgress(), this.plugin.getSyncActionType());
 		};
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Auto sync')
 			.setDesc('Automatically sync on an interval.')
 			.addToggle(toggle => {
@@ -2334,7 +2763,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h3', { text: 'Selective Sync' });
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Sync images')
 			.setDesc('Include image files (png, jpg, gif, svg, etc).')
 			.addToggle(toggle => {
@@ -2346,7 +2775,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Sync audio')
 			.setDesc('Include audio files (mp3, wav, m4a, etc).')
 			.addToggle(toggle => {
@@ -2358,7 +2787,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Sync videos')
 			.setDesc('Include video files (mp4, mov, mkv, etc).')
 			.addToggle(toggle => {
@@ -2370,7 +2799,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Sync PDFs')
 			.setDesc('Include PDF files.')
 			.addToggle(toggle => {
@@ -2382,7 +2811,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Excluded folders')
 			.setDesc('Comma or newline separated folder paths to skip (relative to the vault).')
 			.addTextArea(text => {
@@ -2395,7 +2824,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Exclude patterns')
 			.setDesc('Glob patterns or regex (wrap regex with /.../).')
 			.addTextArea(text => {
@@ -2411,7 +2840,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h3', { text: 'Settings Sync' });
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Appearance settings')
 			.setDesc('Sync dark mode, theme, and enabled snippets.')
 			.addToggle(toggle => {
@@ -2423,7 +2852,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Themes and snippets')
 			.setDesc('Sync themes folder and snippets folder.')
 			.addToggle(toggle => {
@@ -2435,7 +2864,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Plugins')
 			.setDesc('Sync plugins except Sync Drive itself.')
 			.addToggle(toggle => {
@@ -2447,7 +2876,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
-		new Setting(containerEl)
+		registerVaultGate(new Setting(containerEl))
 			.setName('Hotkeys')
 			.setDesc('Sync custom hotkey mappings.')
 			.addToggle(toggle => {
@@ -2459,5 +2888,6 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 			});
 
+		applyVaultGate();
 	}
 }

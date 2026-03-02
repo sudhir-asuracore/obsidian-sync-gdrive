@@ -1,4 +1,4 @@
-import { requestUrl, RequestUrlParam, Notice } from 'obsidian';
+import { requestUrl, RequestUrlParam } from 'obsidian';
 
 export interface GoogleTokenResponse {
     access_token: string;
@@ -92,6 +92,28 @@ export class GDriveHelper {
 
         this.debugLog("API response ok", { status: response.status });
         return response.json;
+    }
+
+    private async requestUrlWithAuth(params: RequestUrlParam, retry = true): Promise<any> {
+        if (!params.headers) params.headers = {};
+        params.headers['Authorization'] = `Bearer ${this.accessToken}`;
+        if (params.throw === undefined) {
+            params.throw = false;
+        }
+
+        const response = await requestUrl(params);
+        if (response.status === 401 && retry && this.refreshToken) {
+            this.debugLog("Received 401, attempting token refresh");
+            await this.refreshAccessToken();
+            return this.requestUrlWithAuth(params, false);
+        }
+
+        if (response.status >= 400) {
+            this.debugLog("API error response", { status: response.status, body: response.text });
+            throw new Error(`Google API Error (${response.status}): ${response.text}`);
+        }
+
+        return response;
     }
 
     async getFolderId(folderName: string): Promise<string | null> {
@@ -314,24 +336,18 @@ export class GDriveHelper {
         }
 
         const headers: Record<string, string> = {
-            'Content-Type': `multipart/related; boundary=${boundary}`,
-            'Authorization': `Bearer ${this.accessToken}`
+            'Content-Type': `multipart/related; boundary=${boundary}`
         };
         if (options?.ifMatch) {
             headers['If-Match'] = options.ifMatch;
         }
 
-        const response = await requestUrl({
+        const response = await this.requestUrlWithAuth({
             url: url,
             method: method,
             headers: headers,
             body: body
         });
-
-        if (response.status >= 400) {
-            this.debugLog("Upload failed", { status: response.status, body: response.text });
-            throw new Error(`Upload Error (${response.status}): ${response.text}`);
-        }
 
         this.debugLog("Upload success", response.json.id);
         return response.json.id;
@@ -380,12 +396,9 @@ export class GDriveHelper {
 
     async downloadFile(fileId: string): Promise<ArrayBuffer> {
         this.debugLog("Downloading file", fileId);
-        const response = await requestUrl({
+        const response = await this.requestUrlWithAuth({
             url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-            method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${this.accessToken}`
-            }
+            method: 'GET'
         });
 
         this.debugLog("Download response", { status: response.status });

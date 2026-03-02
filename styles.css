@@ -8,6 +8,25 @@
     animation: sync-drive-spin 1s linear infinite;
 }
 
+.sync-drive-button-loading {
+    position: relative;
+    padding-right: 1.8em;
+}
+
+.sync-drive-button-loading::after {
+    content: '';
+    position: absolute;
+    right: 0.6em;
+    top: 50%;
+    width: 0.9em;
+    height: 0.9em;
+    margin-top: -0.45em;
+    border: 2px solid var(--text-muted);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: sync-drive-spin 1s linear infinite;
+}
+
 @keyframes sync-drive-spin {
     from {
         transform: rotate(0deg);
