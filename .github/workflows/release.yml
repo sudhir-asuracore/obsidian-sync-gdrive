@@ -15,6 +15,14 @@ on:
           - patch
           - minor
           - major
+      environment:
+        description: "Environment secrets to use."
+        required: false
+        default: "stage"
+        type: choice
+        options:
+          - stage
+          - prod
 
 permissions:
   contents: write
@@ -22,6 +30,7 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'stage' }}
     env:
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -47,7 +56,7 @@ jobs:
       - run: npm run package
       - name: Create release zip
         run: |
-          ZIP_NAME="sync-drive-${{ steps.bump.outputs.version }}.zip"
+          ZIP_NAME="sync-drive-${{ inputs.environment || 'stage' }}-${{ steps.bump.outputs.version }}.zip"
           zip -j "$ZIP_NAME" dist/sync-drive/main.js dist/sync-drive/manifest.json dist/sync-drive/styles.css
       - name: Commit version bump
         run: |
@@ -67,4 +76,4 @@ jobs:
             dist/sync-drive/main.js
             dist/sync-drive/manifest.json
             dist/sync-drive/styles.css
-            sync-drive-${{ steps.bump.outputs.version }}.zip
+            sync-drive-${{ inputs.environment || 'stage' }}-${{ steps.bump.outputs.version }}.zip
