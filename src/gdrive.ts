@@ -1,5 +1,8 @@
 import { requestUrl, RequestUrlParam } from 'obsidian';
 
+const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+const RESUMABLE_UPLOAD_THRESHOLD = 5 * 1024 * 1024;
+
 export interface GoogleTokenResponse {
     access_token: string;
     refresh_token?: string;
@@ -36,6 +39,18 @@ export class GDriveHelper {
             hasAccessToken: !!this.accessToken,
             hasRefreshToken: !!this.refreshToken
         });
+    }
+
+    getFolderPathCache(): Record<string, string> {
+        const entries: Record<string, string> = {};
+        for (const [key, value] of this.folderPathCache.entries()) {
+            entries[key] = value;
+        }
+        return entries;
+    }
+
+    setFolderPathCache(entries: Record<string, string>) {
+        this.folderPathCache = new Map(Object.entries(entries || {}));
     }
 
     async refreshAccessToken(): Promise<string> {
@@ -194,27 +209,45 @@ export class GDriveHelper {
         return files;
     }
 
-    async listFilesRecursive(rootFolderId: string): Promise<any[]> {
+    async listFilesRecursiveWithFolders(rootFolderId: string, concurrency = 4): Promise<{ files: any[]; folders: any[] }> {
         const results: any[] = [];
+        const folders: Array<{ id: string; name: string; parentId?: string; path: string }> = [
+            { id: rootFolderId, name: '', parentId: undefined, path: '' }
+        ];
         const queue: Array<{ id: string; path: string }> = [{ id: rootFolderId, path: '' }];
+        const limit = Math.max(1, Math.min(concurrency, 8));
 
-        while (queue.length > 0) {
-            const current = queue.shift();
-            if (!current) break;
-            const children = await this.listFiles(current.id);
-            for (const child of children) {
-                if (child.mimeType === 'application/vnd.google-apps.folder') {
-                    const childPath = current.path ? `${current.path}${child.name}/` : `${child.name}/`;
-                    queue.push({ id: child.id, path: childPath });
-                } else {
-                    const filePath = current.path ? `${current.path}${child.name}` : child.name;
-                    results.push({ ...child, path: filePath, parentId: current.id });
+        const worker = async () => {
+            while (true) {
+                const current = queue.shift();
+                if (!current) return;
+                const children = await this.listFiles(current.id);
+                for (const child of children) {
+                    if (child.mimeType === DRIVE_FOLDER_MIME) {
+                        const childPath = current.path ? `${current.path}${child.name}/` : `${child.name}/`;
+                        queue.push({ id: child.id, path: childPath });
+                        folders.push({
+                            id: child.id,
+                            name: child.name,
+                            parentId: current.id,
+                            path: childPath.replace(/\/$/, '')
+                        });
+                    } else {
+                        const filePath = current.path ? `${current.path}${child.name}` : child.name;
+                        results.push({ ...child, path: filePath, parentId: current.id });
+                    }
                 }
             }
-        }
+        };
 
+        await Promise.all(Array.from({ length: limit }, () => worker()));
         this.debugLog("Listed files recursively", { rootFolderId, count: results.length });
-        return results;
+        return { files: results, folders };
+    }
+
+    async listFilesRecursive(rootFolderId: string): Promise<any[]> {
+        const listing = await this.listFilesRecursiveWithFolders(rootFolderId);
+        return listing.files;
     }
 
     async findFileByName(folderId: string, name: string): Promise<any | null> {
@@ -293,7 +326,37 @@ export class GDriveHelper {
         });
     }
 
+    private getContentSize(content: string | ArrayBuffer): number {
+        if (typeof content === 'string') {
+            return new TextEncoder().encode(content).byteLength;
+        }
+        return content.byteLength;
+    }
+
     async uploadFile(
+        name: string,
+        content: string | ArrayBuffer,
+        parentId: string,
+        existingFileId?: string,
+        options?: { ifMatch?: string; mimeType?: string }
+    ): Promise<string> {
+        const contentSize = this.getContentSize(content);
+        if (contentSize >= RESUMABLE_UPLOAD_THRESHOLD) {
+            try {
+                return await this.uploadFileResumable(name, content, parentId, existingFileId, options, contentSize);
+            } catch (e: any) {
+                const message = String(e?.message || e || '');
+                if (message.includes('ERR_INVALID_ARGUMENT')) {
+                    this.debugLog("Resumable upload failed, falling back to multipart", { name, error: message });
+                    return await this.uploadFileMultipart(name, content, parentId, existingFileId, options);
+                }
+                throw e;
+            }
+        }
+        return await this.uploadFileMultipart(name, content, parentId, existingFileId, options);
+    }
+
+    private async uploadFileMultipart(
         name: string,
         content: string | ArrayBuffer,
         parentId: string,
@@ -353,6 +416,67 @@ export class GDriveHelper {
         return response.json.id;
     }
 
+    private async uploadFileResumable(
+        name: string,
+        content: string | ArrayBuffer,
+        parentId: string,
+        existingFileId: string | undefined,
+        options: { ifMatch?: string; mimeType?: string } | undefined,
+        contentSize: number
+    ): Promise<string> {
+        this.debugLog("Uploading file (resumable)", { name, parentId, existingFileId, contentSize });
+        const metadata = {
+            name: name,
+            parents: existingFileId ? undefined : [parentId]
+        };
+        const url = existingFileId
+            ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=resumable`
+            : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable';
+        const method = existingFileId ? 'PATCH' : 'POST';
+        const contentType = options?.mimeType || 'text/markdown';
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json; charset=UTF-8',
+            'X-Upload-Content-Type': contentType,
+            'X-Upload-Content-Length': String(contentSize)
+        };
+        if (options?.ifMatch) {
+            headers['If-Match'] = options.ifMatch;
+        }
+
+        const initResponse = await this.requestUrlWithAuth({
+            url: url,
+            method: method,
+            headers: headers,
+            body: JSON.stringify(metadata)
+        });
+
+        const uploadUrl = initResponse.headers?.location || initResponse.headers?.Location;
+        if (!uploadUrl || typeof uploadUrl !== 'string') {
+            throw new Error('Resumable upload initiation failed (missing upload URL).');
+        }
+
+        let body: string | ArrayBuffer;
+        if (typeof content === 'string') {
+            body = content;
+        } else {
+            body = content;
+        }
+
+        const uploadResponse = await this.requestUrlWithAuth({
+            url: uploadUrl,
+            method: 'PUT',
+            headers: {
+                'Content-Type': contentType,
+                'Content-Length': String(contentSize)
+            },
+            body: body
+        });
+
+        const uploadedId = uploadResponse.json?.id || existingFileId || '';
+        this.debugLog("Resumable upload success", uploadedId);
+        return uploadedId;
+    }
+
     async updateFileMetadata(fileId: string, metadata: Record<string, any>): Promise<void> {
         this.debugLog("Updating file metadata", { fileId, keys: Object.keys(metadata) });
         await this.apiRequest({
@@ -392,6 +516,30 @@ export class GDriveHelper {
             this.debugLog("Failed to get file version", e);
             return null;
         }
+    }
+
+    async getChangesStartPageToken(): Promise<string> {
+        this.debugLog("Getting changes start page token");
+        const data = await this.apiRequest({
+            url: 'https://www.googleapis.com/drive/v3/changes/startPageToken',
+            method: 'GET'
+        });
+        return data?.startPageToken || '';
+    }
+
+    async listChanges(pageToken: string): Promise<{ changes: any[]; nextPageToken?: string; newStartPageToken?: string }> {
+        const tokenPart = `pageToken=${encodeURIComponent(pageToken)}`;
+        const fields = 'nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,md5Checksum,size,version,trashed,parents,capabilities))';
+        const url = `https://www.googleapis.com/drive/v3/changes?${tokenPart}&pageSize=1000&fields=${encodeURIComponent(fields)}&includeRemoved=true`;
+        const data = await this.apiRequest({
+            url,
+            method: 'GET'
+        });
+        return {
+            changes: data?.changes || [],
+            nextPageToken: data?.nextPageToken,
+            newStartPageToken: data?.newStartPageToken
+        };
     }
 
     async downloadFile(fileId: string): Promise<ArrayBuffer> {

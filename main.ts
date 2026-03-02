@@ -1,179 +1,9 @@
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl, TFile, ObsidianProtocolData, Menu as ObsidianMenu, setIcon } from 'obsidian';
 import { GDriveHelper } from './src/gdrive';
+import { EncryptionService } from './src/encryption';
+import { Md5Utils } from './src/utils/md5';
 
-const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder('utf-8');
-const BASE64_CHUNK_SIZE = 0x8000;
-
-const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
-	const bytes = new Uint8Array(buffer);
-	let binary = '';
-	for (let i = 0; i < bytes.length; i += BASE64_CHUNK_SIZE) {
-		const chunk = bytes.subarray(i, i + BASE64_CHUNK_SIZE);
-		binary += String.fromCharCode(...chunk);
-	}
-	if (typeof btoa === 'function') {
-		return btoa(binary);
-	}
-	if (typeof Buffer !== 'undefined') {
-		return Buffer.from(bytes).toString('base64');
-	}
-	throw new Error('Base64 encoding not available');
-};
-
-const base64ToArrayBuffer = (base64: string): ArrayBuffer => {
-	if (typeof atob === 'function') {
-		const binary = atob(base64);
-		const bytes = new Uint8Array(binary.length);
-		for (let i = 0; i < binary.length; i++) {
-			bytes[i] = binary.charCodeAt(i);
-		}
-		return bytes.buffer;
-	}
-	if (typeof Buffer !== 'undefined') {
-		return Uint8Array.from(Buffer.from(base64, 'base64')).buffer;
-	}
-	throw new Error('Base64 decoding not available');
-};
-
-const safeAdd = (x: number, y: number): number => {
-	const lsw = (x & 0xffff) + (y & 0xffff);
-	const msw = (x >> 16) + (y >> 16) + (lsw >> 16);
-	return (msw << 16) | (lsw & 0xffff);
-};
-
-const bitRotateLeft = (num: number, cnt: number): number => {
-	return (num << cnt) | (num >>> (32 - cnt));
-};
-
-const md5Cmn = (q: number, a: number, b: number, x: number, s: number, t: number): number => {
-	return safeAdd(bitRotateLeft(safeAdd(safeAdd(a, q), safeAdd(x, t)), s), b);
-};
-
-const md5Ff = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
-	return md5Cmn((b & c) | (~b & d), a, b, x, s, t);
-};
-
-const md5Gg = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
-	return md5Cmn((b & d) | (c & ~d), a, b, x, s, t);
-};
-
-const md5Hh = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
-	return md5Cmn(b ^ c ^ d, a, b, x, s, t);
-};
-
-const md5Ii = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number => {
-	return md5Cmn(c ^ (b | ~d), a, b, x, s, t);
-};
-
-const md5Bytes = (bytes: Uint8Array): string => {
-	const x: number[] = [];
-	for (let i = 0; i < bytes.length; i++) {
-		x[i >> 2] |= bytes[i] << ((i % 4) * 8);
-	}
-	const bitLen = bytes.length * 8;
-	x[bitLen >> 5] |= 0x80 << (bitLen % 32);
-	x[(((bitLen + 64) >>> 9) << 4) + 14] = bitLen;
-
-	let a = 1732584193;
-	let b = -271733879;
-	let c = -1732584194;
-	let d = 271733878;
-
-	for (let i = 0; i < x.length; i += 16) {
-		const oldA = a;
-		const oldB = b;
-		const oldC = c;
-		const oldD = d;
-
-		a = md5Ff(a, b, c, d, x[i + 0], 7, -680876936);
-		d = md5Ff(d, a, b, c, x[i + 1], 12, -389564586);
-		c = md5Ff(c, d, a, b, x[i + 2], 17, 606105819);
-		b = md5Ff(b, c, d, a, x[i + 3], 22, -1044525330);
-		a = md5Ff(a, b, c, d, x[i + 4], 7, -176418897);
-		d = md5Ff(d, a, b, c, x[i + 5], 12, 1200080426);
-		c = md5Ff(c, d, a, b, x[i + 6], 17, -1473231341);
-		b = md5Ff(b, c, d, a, x[i + 7], 22, -45705983);
-		a = md5Ff(a, b, c, d, x[i + 8], 7, 1770035416);
-		d = md5Ff(d, a, b, c, x[i + 9], 12, -1958414417);
-		c = md5Ff(c, d, a, b, x[i + 10], 17, -42063);
-		b = md5Ff(b, c, d, a, x[i + 11], 22, -1990404162);
-		a = md5Ff(a, b, c, d, x[i + 12], 7, 1804603682);
-		d = md5Ff(d, a, b, c, x[i + 13], 12, -40341101);
-		c = md5Ff(c, d, a, b, x[i + 14], 17, -1502002290);
-		b = md5Ff(b, c, d, a, x[i + 15], 22, 1236535329);
-
-		a = md5Gg(a, b, c, d, x[i + 1], 5, -165796510);
-		d = md5Gg(d, a, b, c, x[i + 6], 9, -1069501632);
-		c = md5Gg(c, d, a, b, x[i + 11], 14, 643717713);
-		b = md5Gg(b, c, d, a, x[i + 0], 20, -373897302);
-		a = md5Gg(a, b, c, d, x[i + 5], 5, -701558691);
-		d = md5Gg(d, a, b, c, x[i + 10], 9, 38016083);
-		c = md5Gg(c, d, a, b, x[i + 15], 14, -660478335);
-		b = md5Gg(b, c, d, a, x[i + 4], 20, -405537848);
-		a = md5Gg(a, b, c, d, x[i + 9], 5, 568446438);
-		d = md5Gg(d, a, b, c, x[i + 14], 9, -1019803690);
-		c = md5Gg(c, d, a, b, x[i + 3], 14, -187363961);
-		b = md5Gg(b, c, d, a, x[i + 8], 20, 1163531501);
-		a = md5Gg(a, b, c, d, x[i + 13], 5, -1444681467);
-		d = md5Gg(d, a, b, c, x[i + 2], 9, -51403784);
-		c = md5Gg(c, d, a, b, x[i + 7], 14, 1735328473);
-		b = md5Gg(b, c, d, a, x[i + 12], 20, -1926607734);
-
-		a = md5Hh(a, b, c, d, x[i + 5], 4, -378558);
-		d = md5Hh(d, a, b, c, x[i + 8], 11, -2022574463);
-		c = md5Hh(c, d, a, b, x[i + 11], 16, 1839030562);
-		b = md5Hh(b, c, d, a, x[i + 14], 23, -35309556);
-		a = md5Hh(a, b, c, d, x[i + 1], 4, -1530992060);
-		d = md5Hh(d, a, b, c, x[i + 4], 11, 1272893353);
-		c = md5Hh(c, d, a, b, x[i + 7], 16, -155497632);
-		b = md5Hh(b, c, d, a, x[i + 10], 23, -1094730640);
-		a = md5Hh(a, b, c, d, x[i + 13], 4, 681279174);
-		d = md5Hh(d, a, b, c, x[i + 0], 11, -358537222);
-		c = md5Hh(c, d, a, b, x[i + 3], 16, -722521979);
-		b = md5Hh(b, c, d, a, x[i + 6], 23, 76029189);
-		a = md5Hh(a, b, c, d, x[i + 9], 4, -640364487);
-		d = md5Hh(d, a, b, c, x[i + 12], 11, -421815835);
-		c = md5Hh(c, d, a, b, x[i + 15], 16, 530742520);
-		b = md5Hh(b, c, d, a, x[i + 2], 23, -995338651);
-
-		a = md5Ii(a, b, c, d, x[i + 0], 6, -198630844);
-		d = md5Ii(d, a, b, c, x[i + 7], 10, 1126891415);
-		c = md5Ii(c, d, a, b, x[i + 14], 15, -1416354905);
-		b = md5Ii(b, c, d, a, x[i + 5], 21, -57434055);
-		a = md5Ii(a, b, c, d, x[i + 12], 6, 1700485571);
-		d = md5Ii(d, a, b, c, x[i + 3], 10, -1894986606);
-		c = md5Ii(c, d, a, b, x[i + 10], 15, -1051523);
-		b = md5Ii(b, c, d, a, x[i + 1], 21, -2054922799);
-		a = md5Ii(a, b, c, d, x[i + 8], 6, 1873313359);
-		d = md5Ii(d, a, b, c, x[i + 15], 10, -30611744);
-		c = md5Ii(c, d, a, b, x[i + 6], 15, -1560198380);
-		b = md5Ii(b, c, d, a, x[i + 13], 21, 1309151649);
-		a = md5Ii(a, b, c, d, x[i + 4], 6, -145523070);
-		d = md5Ii(d, a, b, c, x[i + 11], 10, -1120210379);
-		c = md5Ii(c, d, a, b, x[i + 2], 15, 718787259);
-		b = md5Ii(b, c, d, a, x[i + 9], 21, -343485551);
-
-		a = safeAdd(a, oldA);
-		b = safeAdd(b, oldB);
-		c = safeAdd(c, oldC);
-		d = safeAdd(d, oldD);
-	}
-
-	const toHex = (num: number): string => {
-		let hex = '';
-		for (let i = 0; i < 4; i++) {
-			const byte = (num >> (i * 8)) & 0xff;
-			hex += (byte + 0x100).toString(16).slice(1);
-		}
-		return hex;
-	};
-
-	return `${toHex(a)}${toHex(b)}${toHex(c)}${toHex(d)}`;
-};
-
-const md5String = (value: string): string => md5Bytes(textEncoder.encode(value));
-const md5ArrayBuffer = (buffer: ArrayBuffer): string => md5Bytes(new Uint8Array(buffer));
 
 interface SyncDriveSettings {
 	accessToken: string;
@@ -233,12 +63,13 @@ const APPEARANCE_SETTING_FILES = new Set([
 	'appearance.json',
 	'snippets.json'
 ]);
-const ENCRYPTION_MAGIC = textEncoder.encode('SDENC1');
-const ENCRYPTION_TESTER_TEXT = 'encrypt_tester';
-const ENCRYPTION_SALT_BYTES = 16;
-const ENCRYPTION_IV_BYTES = 12;
-const ENCRYPTION_TAG_BYTES = 16;
-const ENCRYPTION_ITERATIONS = 100000;
+const SYNC_IO_CONCURRENCY = 4;
+const DRIVE_LIST_CONCURRENCY = 4;
+const HASH_CONCURRENCY = 4;
+const DELTA_SCAN_MAX_PATHS = 500;
+const FULL_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const REMOTE_CACHE_SCHEMA_VERSION = 1;
+const FOLDER_CACHE_SCHEMA_VERSION = 1;
 
 interface RemoteMetadataEntry {
 	id?: string;
@@ -293,6 +124,7 @@ interface LocalHashCacheFile {
 	schemaVersion: number;
 	updatedAt: number;
 	files: Record<string, LocalHashCacheEntry>;
+	fullScanAt?: number;
 }
 
 interface LocalFileState {
@@ -313,6 +145,50 @@ interface SyncDiff {
 
 type SyncActionType = 'sync' | 'forcePush' | 'forcePull';
 
+interface SyncProgressState {
+	current: number;
+	total: number;
+	action: SyncActionType | null;
+	label?: string;
+}
+
+interface RemoteFolderCacheEntry {
+	id: string;
+	name: string;
+	parentId?: string;
+	path: string;
+}
+
+interface RemoteFileCacheEntry {
+	id: string;
+	name: string;
+	path: string;
+	parentId?: string;
+	mimeType?: string;
+	modifiedTime?: string;
+	md5Checksum?: string;
+	size?: string;
+	version?: string;
+	trashed?: boolean;
+	capabilities?: any;
+}
+
+interface RemoteFileCacheFile {
+	schemaVersion: number;
+	rootFolderId: string;
+	changeToken?: string;
+	cachedAt: number;
+	files: Record<string, RemoteFileCacheEntry>;
+	folders: Record<string, RemoteFolderCacheEntry>;
+}
+
+interface FolderPathCacheFile {
+	schemaVersion: number;
+	rootFolderId: string;
+	cachedAt: number;
+	entries: Record<string, string>;
+}
+
 export default class SyncDrivePlugin extends Plugin {
 	settings!: SyncDriveSettings;
 	gdrive!: GDriveHelper;
@@ -320,12 +196,25 @@ export default class SyncDrivePlugin extends Plugin {
 	private syncInProgress = false;
 	private syncActionType: SyncActionType | null = null;
 	private syncActionListener: ((inProgress: boolean, action: SyncActionType | null) => void) | null = null;
+	private syncProgressListener: ((state: SyncProgressState) => void) | null = null;
+	private syncProgressState: SyncProgressState = { current: 0, total: 0, action: null };
 	private ribbonIconEl: HTMLElement | null = null;
 	private autoSyncTimer: number | null = null;
 	private deltaDirtyPaths = new Set<string>();
 	private deltaFlushTimer: number | null = null;
 	private deltaLoaded = false;
 	private deltaVaultKey: string | null = null;
+	private folderPathCacheRootId: string | null = null;
+	private encryptionService: EncryptionService;
+
+	constructor(app: App, manifest: any) {
+		super(app, manifest);
+		this.encryptionService = new EncryptionService({
+			getKey: () => this.getEncryptionKey(),
+			getMismatchMessage: () => this.getEncryptionMismatchMessage(),
+			isEnabled: () => this.isEncryptionEnabled()
+		});
+	}
 	private vaultsMetaCache: VaultsMetaFile | null = null;
 	private vaultsMetaFileId: string | null = null;
 	private vaultsMetaRootId: string | null = null;
@@ -352,6 +241,17 @@ export default class SyncDrivePlugin extends Plugin {
 		this.syncActionListener = listener;
 	}
 
+	setSyncProgressListener(listener: ((state: SyncProgressState) => void) | null) {
+		this.syncProgressListener = listener;
+		if (listener) {
+			listener(this.syncProgressState);
+		}
+	}
+
+	getSyncProgressState(): SyncProgressState {
+		return this.syncProgressState;
+	}
+
 	isSyncActionInProgress(): boolean {
 		return this.syncInProgress;
 	}
@@ -368,6 +268,20 @@ export default class SyncDrivePlugin extends Plugin {
 		}
 	}
 
+	private updateSyncProgress(current: number, total: number, label?: string) {
+		this.syncProgressState = { current, total, action: this.syncActionType, label };
+		if (this.syncProgressListener) {
+			this.syncProgressListener(this.syncProgressState);
+		}
+	}
+
+	private resetSyncProgress() {
+		this.syncProgressState = { current: 0, total: 0, action: null };
+		if (this.syncProgressListener) {
+			this.syncProgressListener(this.syncProgressState);
+		}
+	}
+
 	private tryBeginSyncAction(action: SyncActionType, trigger: 'manual' | 'auto' = 'manual'): boolean {
 		if (this.syncInProgress) {
 			if (trigger === 'manual') {
@@ -376,11 +290,13 @@ export default class SyncDrivePlugin extends Plugin {
 			return false;
 		}
 		this.setSyncActionState(true, action);
+		this.updateSyncProgress(0, 0);
 		return true;
 	}
 
 	private endSyncAction() {
 		this.setSyncActionState(false, null);
+		this.resetSyncProgress();
 	}
 
 	private getDebugLoggingFromEnv(): boolean {
@@ -401,149 +317,17 @@ export default class SyncDrivePlugin extends Plugin {
 		return 'Encryption key mismatch. Please verify the key and run a force push if the key was changed.';
 	}
 
-	private toArrayBuffer(data: Uint8Array): ArrayBuffer {
-		const copy = new Uint8Array(data.byteLength);
-		copy.set(data);
-		return copy.buffer;
-	}
-
-	private getWebCrypto(): Crypto {
-		if (globalThis.crypto && globalThis.crypto.subtle) {
-			return globalThis.crypto;
-		}
-		throw new Error('WebCrypto is not available in this environment.');
-	}
-
-	private randomBytes(size: number): Uint8Array {
-		const bytes = new Uint8Array(size);
-		this.getWebCrypto().getRandomValues(bytes);
-		return bytes;
-	}
-
-	private async deriveEncryptionKey(key: string, salt: Uint8Array): Promise<CryptoKey> {
-		const crypto = this.getWebCrypto();
-		const baseKey = await crypto.subtle.importKey(
-			'raw',
-			textEncoder.encode(key),
-			'PBKDF2',
-			false,
-			['deriveKey']
-		);
-		const saltBuffer = this.toArrayBuffer(salt);
-		return crypto.subtle.deriveKey(
-			{ name: 'PBKDF2', salt: saltBuffer, iterations: ENCRYPTION_ITERATIONS, hash: 'SHA-256' },
-			baseKey,
-			{ name: 'AES-GCM', length: 256 },
-			false,
-			['encrypt', 'decrypt']
-		);
-	}
-
-	private async encryptContentWithKey(data: ArrayBuffer, key: string): Promise<ArrayBuffer> {
-		const crypto = this.getWebCrypto();
-		const salt = this.randomBytes(ENCRYPTION_SALT_BYTES);
-		const iv = this.randomBytes(ENCRYPTION_IV_BYTES);
-		const derived = await this.deriveEncryptionKey(key, salt);
-		const ivBuffer = this.toArrayBuffer(iv);
-		const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: ivBuffer }, derived, data);
-		const encryptedBytes = new Uint8Array(encrypted);
-		const tag = encryptedBytes.slice(encryptedBytes.length - ENCRYPTION_TAG_BYTES);
-		const ciphertext = encryptedBytes.slice(0, encryptedBytes.length - ENCRYPTION_TAG_BYTES);
-		const payload = new Uint8Array(
-			ENCRYPTION_MAGIC.length + ENCRYPTION_SALT_BYTES + ENCRYPTION_IV_BYTES + ENCRYPTION_TAG_BYTES + ciphertext.length
-		);
-		let offset = 0;
-		payload.set(ENCRYPTION_MAGIC, offset);
-		offset += ENCRYPTION_MAGIC.length;
-		payload.set(salt, offset);
-		offset += ENCRYPTION_SALT_BYTES;
-		payload.set(iv, offset);
-		offset += ENCRYPTION_IV_BYTES;
-		payload.set(tag, offset);
-		offset += ENCRYPTION_TAG_BYTES;
-		payload.set(ciphertext, offset);
-		return this.toArrayBuffer(payload);
-	}
-
-	private async decryptContentWithKey(data: ArrayBuffer, key: string): Promise<ArrayBuffer> {
-		const payload = new Uint8Array(data);
-		const headerSize = ENCRYPTION_MAGIC.length + ENCRYPTION_SALT_BYTES + ENCRYPTION_IV_BYTES + ENCRYPTION_TAG_BYTES;
-		if (payload.length <= headerSize) {
-			throw new Error(this.getEncryptionMismatchMessage());
-		}
-		const magic = payload.subarray(0, ENCRYPTION_MAGIC.length);
-		if (magic.length !== ENCRYPTION_MAGIC.length || !magic.every((value, index) => value === ENCRYPTION_MAGIC[index])) {
-			throw new Error(this.getEncryptionMismatchMessage());
-		}
-		let offset = ENCRYPTION_MAGIC.length;
-		const salt = payload.subarray(offset, offset + ENCRYPTION_SALT_BYTES);
-		offset += ENCRYPTION_SALT_BYTES;
-		const iv = payload.subarray(offset, offset + ENCRYPTION_IV_BYTES);
-		offset += ENCRYPTION_IV_BYTES;
-		const tag = payload.subarray(offset, offset + ENCRYPTION_TAG_BYTES);
-		offset += ENCRYPTION_TAG_BYTES;
-		const ciphertext = payload.subarray(offset);
-		const combined = new Uint8Array(ciphertext.length + tag.length);
-		combined.set(ciphertext, 0);
-		combined.set(tag, ciphertext.length);
-		const crypto = this.getWebCrypto();
-		const derived = await this.deriveEncryptionKey(key, salt);
-		const ivBuffer = this.toArrayBuffer(iv);
-		const combinedBuffer = this.toArrayBuffer(combined);
-		return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBuffer }, derived, combinedBuffer);
-	}
-
-	private async encryptContent(data: ArrayBuffer): Promise<ArrayBuffer> {
-		const key = this.getEncryptionKey();
-		if (!key) return data;
-		return await this.encryptContentWithKey(data, key);
-	}
-
-	private async decryptContent(data: ArrayBuffer): Promise<ArrayBuffer> {
-		const key = this.getEncryptionKey();
-		if (!key) return data;
-		return await this.decryptContentWithKey(data, key);
-	}
-
 	private async decryptContentOrThrow(data: ArrayBuffer): Promise<ArrayBuffer> {
-		if (!this.isEncryptionEnabled()) return data;
-		try {
-			return await this.decryptContent(data);
-		} catch (e) {
-			throw new Error(this.getEncryptionMismatchMessage());
-		}
-	}
-
-	private async buildEncryptionTester(): Promise<string> {
-		const raw = textEncoder.encode(ENCRYPTION_TESTER_TEXT);
-		const encrypted = await this.encryptContentWithKey(raw.buffer, this.getEncryptionKey());
-		return arrayBufferToBase64(encrypted);
+		return await this.encryptionService.decryptContentOrThrow(data);
 	}
 
 	private async applyEncryptionTester(metadata: RemoteMetadataFile): Promise<RemoteMetadataFile> {
-		metadata.encrypt_tester = await this.buildEncryptionTester();
+		metadata.encrypt_tester = await this.encryptionService.buildEncryptionTester();
 		return metadata;
 	}
 
 	private async verifyEncryptionTester(metadata: RemoteMetadataFile): Promise<void> {
-		const tester = metadata.encrypt_tester;
-		if (!tester) {
-			if (this.isEncryptionEnabled()) {
-				throw new Error(this.getEncryptionMismatchMessage());
-			}
-			return;
-		}
-
-		try {
-			const decoded = base64ToArrayBuffer(tester);
-			const decrypted = await this.decryptContentWithKey(decoded, this.getEncryptionKey());
-			const text = textDecoder.decode(new Uint8Array(decrypted));
-			if (text !== ENCRYPTION_TESTER_TEXT) {
-				throw new Error(this.getEncryptionMismatchMessage());
-			}
-		} catch {
-			throw new Error(this.getEncryptionMismatchMessage());
-		}
+		await this.encryptionService.verifyEncryptionTester(metadata.encrypt_tester);
 	}
 
 	private async readLocalFileForUpload(path: string, localFile: TFile | null): Promise<ArrayBuffer> {
@@ -551,7 +335,7 @@ export default class SyncDrivePlugin extends Plugin {
 			const content = localFile instanceof TFile
 				? await this.app.vault.readBinary(localFile)
 				: await this.app.vault.adapter.readBinary(path);
-			return await this.encryptContent(content);
+			return await this.encryptionService.encryptContent(content);
 		}
 
 		return localFile instanceof TFile
@@ -574,7 +358,7 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private computeStringHash(value: string): string {
-		return md5String(value);
+		return Md5Utils.md5String(value);
 	}
 
 	private getRootScopedFileName(baseName: string, rootFolderId: string): string {
@@ -863,6 +647,10 @@ export default class SyncDrivePlugin extends Plugin {
 		this.deltaLoaded = false;
 		this.deltaVaultKey = null;
 		this.clearDeltaFlushTimer();
+		this.folderPathCacheRootId = null;
+		if (this.gdrive) {
+			this.gdrive.setFolderPathCache({});
+		}
 	}
 
 	private getPluginDataPath(fileName: string): string {
@@ -940,6 +728,7 @@ export default class SyncDrivePlugin extends Plugin {
 		return {
 			schemaVersion: 1,
 			updatedAt: 0,
+			fullScanAt: 0,
 			files: {}
 		};
 	}
@@ -948,6 +737,234 @@ export default class SyncDrivePlugin extends Plugin {
 		await this.ensurePluginDataDir();
 		const path = this.getPluginDataPath(this.getVaultScopedFileName('local-hash-cache.json'));
 		await this.app.vault.adapter.write(path, JSON.stringify(cache, null, 2));
+	}
+
+	private getFolderPathCacheFileName(rootFolderId: string): string {
+		return this.getRootScopedFileName('folder-path-cache.json', rootFolderId);
+	}
+
+	private async loadFolderPathCache(rootFolderId: string): Promise<void> {
+		if (this.folderPathCacheRootId === rootFolderId) return;
+		this.folderPathCacheRootId = rootFolderId;
+		const path = this.getPluginDataPath(this.getFolderPathCacheFileName(rootFolderId));
+		try {
+			if (await this.app.vault.adapter.exists(path)) {
+				const raw = await this.app.vault.adapter.read(path);
+				const parsed = JSON.parse(raw);
+				if (parsed && parsed.schemaVersion === FOLDER_CACHE_SCHEMA_VERSION && parsed.entries) {
+					this.gdrive.setFolderPathCache(parsed.entries);
+					return;
+				}
+			}
+		} catch (e) {
+			console.warn("Failed to load folder path cache", e);
+		}
+		this.gdrive.setFolderPathCache({});
+	}
+
+	private async saveFolderPathCache(rootFolderId: string): Promise<void> {
+		await this.ensurePluginDataDir();
+		const entries = this.gdrive.getFolderPathCache();
+		const payload: FolderPathCacheFile = {
+			schemaVersion: FOLDER_CACHE_SCHEMA_VERSION,
+			rootFolderId,
+			cachedAt: Date.now(),
+			entries
+		};
+		const path = this.getPluginDataPath(this.getFolderPathCacheFileName(rootFolderId));
+		await this.app.vault.adapter.write(path, JSON.stringify(payload, null, 2));
+	}
+
+	private async ensureRemoteFolders(rootFolderId: string, folderPaths: string[]): Promise<void> {
+		const unique = Array.from(new Set(folderPaths.filter(Boolean)));
+		if (unique.length === 0) return;
+		await this.loadFolderPathCache(rootFolderId);
+		await this.runWithConcurrency(unique, DRIVE_LIST_CONCURRENCY, async (folderPath) => {
+			await this.gdrive.ensureFolderPath(rootFolderId, folderPath);
+		});
+		await this.saveFolderPathCache(rootFolderId);
+	}
+
+	private getRemoteFileCacheFileName(rootFolderId: string): string {
+		return this.getRootScopedFileName('remote-files-cache.json', rootFolderId);
+	}
+
+	private async loadRemoteFileCache(rootFolderId: string): Promise<RemoteFileCacheFile | null> {
+		const path = this.getPluginDataPath(this.getRemoteFileCacheFileName(rootFolderId));
+		try {
+			if (await this.app.vault.adapter.exists(path)) {
+				const raw = await this.app.vault.adapter.read(path);
+				const parsed = JSON.parse(raw);
+				if (parsed && parsed.schemaVersion === REMOTE_CACHE_SCHEMA_VERSION && parsed.rootFolderId === rootFolderId) {
+					return parsed as RemoteFileCacheFile;
+				}
+			}
+		} catch (e) {
+			console.warn("Failed to load remote file cache", e);
+		}
+		return null;
+	}
+
+	private async saveRemoteFileCache(cache: RemoteFileCacheFile): Promise<void> {
+		await this.ensurePluginDataDir();
+		const path = this.getPluginDataPath(this.getRemoteFileCacheFileName(cache.rootFolderId));
+		await this.app.vault.adapter.write(path, JSON.stringify(cache, null, 2));
+	}
+
+	private async buildRemoteFileCacheFromListing(rootFolderId: string): Promise<RemoteFileCacheFile> {
+		const listing = await this.gdrive.listFilesRecursiveWithFolders(rootFolderId, DRIVE_LIST_CONCURRENCY);
+		const files: Record<string, RemoteFileCacheEntry> = {};
+		for (const file of listing.files) {
+			const path = this.getRemoteFilePath(file);
+			if (!path) continue;
+			files[file.id] = {
+				id: file.id,
+				name: file.name,
+				path,
+				parentId: file.parentId,
+				mimeType: file.mimeType,
+				modifiedTime: file.modifiedTime,
+				md5Checksum: file.md5Checksum,
+				size: file.size,
+				version: file.version,
+				trashed: file.trashed,
+				capabilities: file.capabilities
+			};
+		}
+		const folders: Record<string, RemoteFolderCacheEntry> = {};
+		for (const folder of listing.folders) {
+			folders[folder.id] = {
+				id: folder.id,
+				name: folder.name,
+				parentId: folder.parentId,
+				path: folder.path
+			};
+		}
+		const changeToken = await this.gdrive.getChangesStartPageToken();
+		return {
+			schemaVersion: REMOTE_CACHE_SCHEMA_VERSION,
+			rootFolderId,
+			changeToken,
+			cachedAt: Date.now(),
+			files,
+			folders
+		};
+	}
+
+	private async updateRemoteFileCacheFromChanges(rootFolderId: string, cache: RemoteFileCacheFile): Promise<RemoteFileCacheFile> {
+		if (!cache.changeToken) {
+			return await this.buildRemoteFileCacheFromListing(rootFolderId);
+		}
+
+		let pageToken: string | undefined = cache.changeToken;
+		let newStartToken: string | undefined;
+		const changes: any[] = [];
+		while (pageToken) {
+			const page = await this.gdrive.listChanges(pageToken);
+			if (page.changes && page.changes.length > 0) {
+				changes.push(...page.changes);
+			}
+			if (page.newStartPageToken) {
+				newStartToken = page.newStartPageToken;
+			}
+			pageToken = page.nextPageToken;
+		}
+
+		let needsFullRefresh = false;
+		for (const change of changes) {
+			const fileId = change.fileId as string;
+			const removed = !!change.removed;
+			if (removed) {
+				if (cache.folders[fileId]) {
+					needsFullRefresh = true;
+					break;
+				}
+				delete cache.files[fileId];
+				continue;
+			}
+			const file = change.file;
+			if (!file) continue;
+			const mimeType = file.mimeType as string | undefined;
+			const isFolder = mimeType === 'application/vnd.google-apps.folder';
+			const parentId = Array.isArray(file.parents) && file.parents.length > 0 ? file.parents[0] : undefined;
+			const parentEntry = parentId && parentId !== rootFolderId ? cache.folders[parentId] : undefined;
+			const parentPath = parentEntry ? parentEntry.path : '';
+			if (isFolder) {
+				if (file.trashed) {
+					if (cache.folders[fileId]) {
+						needsFullRefresh = true;
+						break;
+					}
+					continue;
+				}
+				if (parentId && parentId !== rootFolderId && !parentEntry) {
+					if (cache.folders[fileId]) {
+						needsFullRefresh = true;
+						break;
+					}
+					continue;
+				}
+				const folderPath = parentPath ? `${parentPath}/${file.name}` : file.name;
+				const existing = cache.folders[fileId];
+				if (existing && existing.path !== folderPath) {
+					needsFullRefresh = true;
+					break;
+				}
+				cache.folders[fileId] = {
+					id: fileId,
+					name: file.name,
+					parentId: parentId,
+					path: folderPath
+				};
+				continue;
+			}
+			if (file.trashed) {
+				delete cache.files[fileId];
+				continue;
+			}
+			if (parentId && parentId !== rootFolderId && !parentEntry) {
+				if (cache.files[fileId]) {
+					needsFullRefresh = true;
+					break;
+				}
+				continue;
+			}
+			const path = parentPath ? `${parentPath}/${file.name}` : file.name;
+			cache.files[fileId] = {
+				id: fileId,
+				name: file.name,
+				path,
+				parentId: parentId,
+				mimeType: mimeType,
+				modifiedTime: file.modifiedTime,
+				md5Checksum: file.md5Checksum,
+				size: file.size,
+				version: file.version,
+				trashed: file.trashed,
+				capabilities: file.capabilities
+			};
+		}
+
+		if (needsFullRefresh) {
+			return await this.buildRemoteFileCacheFromListing(rootFolderId);
+		}
+
+		cache.changeToken = newStartToken || cache.changeToken;
+		cache.cachedAt = Date.now();
+		return cache;
+	}
+
+	private async getRemoteFilesForForceOps(rootFolderId: string): Promise<any[]> {
+		let cache = await this.loadRemoteFileCache(rootFolderId);
+		if (!cache) {
+			cache = await this.buildRemoteFileCacheFromListing(rootFolderId);
+			await this.saveRemoteFileCache(cache);
+			return Object.values(cache.files);
+		}
+
+		const updated = await this.updateRemoteFileCacheFromChanges(rootFolderId, cache);
+		await this.saveRemoteFileCache(updated);
+		return Object.values(updated.files);
 	}
 
 	private async loadDeltaState(): Promise<void> {
@@ -1299,10 +1316,10 @@ export default class SyncDrivePlugin extends Plugin {
 		return { metadata: null, fileId: metadataFile.id || null, version: version, etag: etag };
 	}
 
-	private async buildRemoteMetadataFromDrive(folderId: string): Promise<RemoteMetadataFile> {
-		const remoteFiles = await this.gdrive.listFilesRecursive(folderId);
+	private async buildRemoteMetadataFromDrive(folderId: string, remoteFiles?: any[]): Promise<RemoteMetadataFile> {
+		const listing = remoteFiles || await this.getRemoteFilesForForceOps(folderId);
 		const files: Record<string, RemoteMetadataEntry> = {};
-		for (const file of remoteFiles) {
+		for (const file of listing) {
 			const path = this.getRemoteFilePath(file);
 			if (!path || this.isReservedRemotePath(path)) continue;
 			const modifiedTime = file.modifiedTime ? new Date(file.modifiedTime).getTime() : 0;
@@ -1329,21 +1346,145 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private computeHash(content: ArrayBuffer): string {
-		return md5ArrayBuffer(content);
+		return Md5Utils.md5ArrayBuffer(content);
 	}
 
-	private async scanLocalFiles(hashCache: LocalHashCacheFile): Promise<{ files: Record<string, LocalFileState>; cache: LocalHashCacheFile }> {
-		const fileByPath = await this.buildLocalFileMap();
+	private async runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<void>): Promise<void> {
+		if (items.length === 0) return;
+		const limit = Math.max(1, Math.min(concurrency, items.length));
+		let index = 0;
+		let error: any = null;
+		const next = () => {
+			if (index >= items.length) return null;
+			const current = items[index];
+			index += 1;
+			return current;
+		};
+		const workerLoop = async () => {
+			while (!error) {
+				const item = next();
+				if (item === null) return;
+				try {
+					await worker(item, index - 1);
+				} catch (e) {
+					error = e;
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: limit }, () => workerLoop()));
+		if (error) {
+			throw error;
+		}
+	}
 
+	private shouldUseDeltaScan(trigger: 'manual' | 'auto', hashCache: LocalHashCacheFile): boolean {
+		if (!this.deltaLoaded || this.deltaDirtyPaths.size === 0) return false;
+		if (this.deltaDirtyPaths.size > DELTA_SCAN_MAX_PATHS) return false;
+		if (!hashCache || Object.keys(hashCache.files).length === 0) return false;
+		const lastFullScan = hashCache.fullScanAt || 0;
+		if (Date.now() - lastFullScan > FULL_SCAN_INTERVAL_MS) return false;
+		return true;
+	}
+
+	private buildHashCacheFromLocalCurrent(localCurrent: Record<string, LocalFileState>, fullScanAt?: number): LocalHashCacheFile {
+		const files: Record<string, LocalHashCacheEntry> = {};
+		for (const [path, entry] of Object.entries(localCurrent)) {
+			files[path] = {
+				hash: entry.hash,
+				modifiedTime: entry.modifiedTime,
+				size: entry.size
+			};
+		}
+		return {
+			schemaVersion: 1,
+			updatedAt: Date.now(),
+			fullScanAt: fullScanAt || Date.now(),
+			files
+		};
+	}
+
+	private async scanLocalFiles(
+		hashCache: LocalHashCacheFile,
+		options?: { trigger?: 'manual' | 'auto'; forceFull?: boolean }
+	): Promise<{ files: Record<string, LocalFileState>; cache: LocalHashCacheFile }> {
+		const trigger = options?.trigger || 'manual';
+		const useDelta = !options?.forceFull && this.shouldUseDeltaScan(trigger, hashCache);
 		const result: Record<string, LocalFileState> = {};
 		const nextCache: LocalHashCacheFile = {
 			schemaVersion: 1,
 			updatedAt: Date.now(),
-			files: {}
+			files: {},
+			fullScanAt: hashCache.fullScanAt
 		};
-		for (const [path, localFile] of fileByPath.entries()) {
-			if (this.isPathExcluded(path)) continue;
 
+		if (useDelta) {
+			const dirtyPaths = Array.from(this.deltaDirtyPaths).filter(path => !this.isPathExcluded(path));
+			const dirtySet = new Set(dirtyPaths);
+			for (const [path, cached] of Object.entries(hashCache.files)) {
+				if (dirtySet.has(path) || this.isPathExcluded(path)) continue;
+				result[path] = {
+					hash: cached.hash,
+					modifiedTime: cached.modifiedTime,
+					size: cached.size
+				};
+				nextCache.files[path] = {
+					hash: cached.hash,
+					modifiedTime: cached.modifiedTime,
+					size: cached.size
+				};
+			}
+
+			await this.runWithConcurrency(dirtyPaths, HASH_CONCURRENCY, async (path) => {
+				const localFile = this.app.vault.getAbstractFileByPath(path);
+				let size = 0;
+				let modifiedTime = 0;
+				if (localFile instanceof TFile) {
+					size = localFile.stat.size;
+					modifiedTime = localFile.stat.mtime;
+				} else {
+					const stat = await this.app.vault.adapter.stat(path);
+					if (!stat || stat.type !== 'file') return;
+					size = stat.size;
+					modifiedTime = stat.mtime;
+				}
+
+				const cached = hashCache.files[path];
+				if (cached && cached.size === size && cached.modifiedTime === modifiedTime && cached.hash) {
+					result[path] = {
+						hash: cached.hash,
+						modifiedTime: modifiedTime,
+						size: size
+					};
+					nextCache.files[path] = {
+						hash: cached.hash,
+						modifiedTime: modifiedTime,
+						size: size
+					};
+					return;
+				}
+
+				const content = localFile instanceof TFile
+					? await this.app.vault.readBinary(localFile)
+					: await this.app.vault.adapter.readBinary(path);
+				const hash = this.computeHash(content);
+				result[path] = {
+					hash: hash,
+					modifiedTime: modifiedTime,
+					size: size
+				};
+				nextCache.files[path] = {
+					hash: hash,
+					modifiedTime: modifiedTime,
+					size: size
+				};
+			});
+
+			return { files: result, cache: nextCache };
+		}
+
+		const fileByPath = await this.buildLocalFileMap();
+		const entries = Array.from(fileByPath.entries()).filter(([path]) => !this.isPathExcluded(path));
+		await this.runWithConcurrency(entries, HASH_CONCURRENCY, async ([path, localFile]) => {
 			let size = 0;
 			let modifiedTime = 0;
 			if (localFile instanceof TFile) {
@@ -1351,7 +1492,7 @@ export default class SyncDrivePlugin extends Plugin {
 				modifiedTime = localFile.stat.mtime;
 			} else {
 				const stat = await this.app.vault.adapter.stat(path);
-				if (!stat || stat.type !== 'file') continue;
+				if (!stat || stat.type !== 'file') return;
 				size = stat.size;
 				modifiedTime = stat.mtime;
 			}
@@ -1368,7 +1509,7 @@ export default class SyncDrivePlugin extends Plugin {
 					modifiedTime: modifiedTime,
 					size: size
 				};
-				continue;
+				return;
 			}
 
 			const content = localFile instanceof TFile
@@ -1385,8 +1526,9 @@ export default class SyncDrivePlugin extends Plugin {
 				modifiedTime: modifiedTime,
 				size: size
 			};
-		}
+		});
 
+		nextCache.fullScanAt = Date.now();
 		return { files: result, cache: nextCache };
 	}
 
@@ -1847,6 +1989,7 @@ export default class SyncDrivePlugin extends Plugin {
 
 			const folderId = resolvedVaultId || await this.getVaultFolderId(rootFolderId);
 			if (!folderId) return;
+			await this.loadFolderPathCache(folderId);
 
 			// const vaultsMeta = await this.ensureVaultsMeta(rootFolderId);
 			// const vaultEntry = vaultsMeta.vaults.find(vault => vault.id === folderId);
@@ -1883,7 +2026,7 @@ export default class SyncDrivePlugin extends Plugin {
 			}
 
 			const hashCache = await this.loadLocalHashCache();
-			const scan = await this.scanLocalFiles(hashCache);
+			const scan = await this.scanLocalFiles(hashCache, { trigger });
 			let localCurrent = scan.files;
 			let hashCacheState = scan.cache;
 
@@ -1899,6 +2042,31 @@ export default class SyncDrivePlugin extends Plugin {
 			const localCurrentForSync = this.filterLocalCurrentBySyncRules(localCurrent);
 			const diff = this.buildDiff(remoteMetadataForSync, localStateForSync, localCurrentForSync);
 			const hasChanges = this.hasDiffChanges(diff);
+			const totalSteps = diff.renameLocal.length
+				+ diff.conflicts.length
+				+ diff.toDownload.length
+				+ diff.toDeleteLocal.length
+				+ diff.renameRemote.length
+				+ diff.toUpload.length
+				+ diff.toDeleteRemote.length;
+			let completedSteps = 0;
+			const advanceProgress = () => {
+				completedSteps += 1;
+				this.updateSyncProgress(completedSteps, totalSteps);
+			};
+			if (totalSteps > 0) {
+				this.updateSyncProgress(0, totalSteps);
+			} else {
+				this.updateSyncProgress(0, 0);
+			}
+
+			await this.ensureRemoteFolders(
+				folderId,
+				[
+					...diff.renameRemote.map(rename => this.getPathDir(rename.to)),
+					...diff.toUpload.map(path => this.getPathDir(path))
+				]
+			);
 
 			for (const rename of diff.renameLocal) {
 				const localFile = this.app.vault.getAbstractFileByPath(rename.from);
@@ -1907,6 +2075,7 @@ export default class SyncDrivePlugin extends Plugin {
 					localCurrent[rename.to] = localCurrent[rename.from];
 					delete localCurrent[rename.from];
 				}
+				advanceProgress();
 			}
 
 			for (const conflict of diff.conflicts) {
@@ -1918,42 +2087,53 @@ export default class SyncDrivePlugin extends Plugin {
 					delete localCurrent[conflict];
 				}
 				diff.toDownload.push(conflict);
+				advanceProgress();
 			}
 
 			const configPrefix = this.getConfigDirPrefix();
 
-			for (const path of diff.toDownload) {
-				const remoteEntry = remoteMetadata.files[path];
-				if (!remoteEntry || remoteEntry.isDeleted || !remoteEntry.id) continue;
-				const content = await this.gdrive.downloadFile(remoteEntry.id);
-				const decrypted = await this.decryptContentOrThrow(content);
-				await this.ensureLocalFolderForPath(path);
-				const localFile = this.app.vault.getAbstractFileByPath(path);
-				if (localFile instanceof TFile) {
-					await this.app.vault.modifyBinary(localFile, decrypted);
-				} else if (path.startsWith(configPrefix)) {
-					await this.app.vault.adapter.writeBinary(path, decrypted);
-				} else {
-					await this.app.vault.createBinary(path, decrypted);
+			await this.runWithConcurrency(diff.toDownload, SYNC_IO_CONCURRENCY, async (path) => {
+				try {
+					const remoteEntry = remoteMetadata.files[path];
+					if (!remoteEntry || remoteEntry.isDeleted || !remoteEntry.id) {
+						return;
+					}
+					const content = await this.gdrive.downloadFile(remoteEntry.id);
+					const decrypted = await this.decryptContentOrThrow(content);
+					await this.ensureLocalFolderForPath(path);
+					const localFile = this.app.vault.getAbstractFileByPath(path);
+					if (localFile instanceof TFile) {
+						await this.app.vault.modifyBinary(localFile, decrypted);
+					} else if (path.startsWith(configPrefix)) {
+						await this.app.vault.adapter.writeBinary(path, decrypted);
+					} else {
+						await this.app.vault.createBinary(path, decrypted);
+					}
+					const hash = remoteEntry.hash || this.computeHash(decrypted);
+					localCurrent[path] = {
+						hash: hash,
+						modifiedTime: remoteEntry.modifiedTime || Date.now(),
+						size: remoteEntry.size || decrypted.byteLength
+					};
+				} finally {
+					advanceProgress();
 				}
-				const hash = remoteEntry.hash || this.computeHash(decrypted);
-				localCurrent[path] = {
-					hash: hash,
-					modifiedTime: remoteEntry.modifiedTime || Date.now(),
-					size: remoteEntry.size || decrypted.byteLength
-				};
-			}
+			});
 
-			for (const path of diff.toDeleteLocal) {
-				const localFile = this.app.vault.getAbstractFileByPath(path);
-				if (localFile instanceof TFile) {
-					await this.app.vault.delete(localFile);
-					delete localCurrent[path];
-				} else if (path.startsWith(configPrefix)) {
-					await this.app.vault.adapter.remove(path);
-					delete localCurrent[path];
+			await this.runWithConcurrency(diff.toDeleteLocal, SYNC_IO_CONCURRENCY, async (path) => {
+				try {
+					const localFile = this.app.vault.getAbstractFileByPath(path);
+					if (localFile instanceof TFile) {
+						await this.app.vault.delete(localFile);
+						delete localCurrent[path];
+					} else if (path.startsWith(configPrefix)) {
+						await this.app.vault.adapter.remove(path);
+						delete localCurrent[path];
+					}
+				} finally {
+					advanceProgress();
 				}
-			}
+			});
 
 			for (const rename of diff.renameRemote) {
 				const entryPath = Object.keys(remoteMetadata.files).find(p => remoteMetadata.files[p].id === rename.id);
@@ -1973,32 +2153,41 @@ export default class SyncDrivePlugin extends Plugin {
 					};
 					delete remoteMetadata.files[entryPath];
 				}
+				advanceProgress();
 			}
 
-			for (const path of diff.toUpload) {
-				const localFile = this.app.vault.getAbstractFileByPath(path);
-				const content = await this.readLocalFileForUpload(path, localFile instanceof TFile ? localFile : null);
-				const remoteEntry = remoteMetadata.files[path];
-				const remoteId = remoteEntry && !remoteEntry.isDeleted ? remoteEntry.id : undefined;
-				const uploaded = await this.gdrive.uploadFileByPath(folderId, path, content, remoteId);
-				remoteMetadata.files[path] = {
-					id: uploaded.id,
-					parentId: uploaded.parentId,
-					hash: localCurrent[path].hash,
-					modifiedTime: localCurrent[path].modifiedTime,
-					size: localCurrent[path].size,
-					isDeleted: false,
-					mimeType: 'text/markdown'
-				};
-			}
-
-			for (const path of diff.toDeleteRemote) {
-				const remoteEntry = remoteMetadata.files[path];
-				if (remoteEntry?.id) {
-					await this.gdrive.deleteFile(remoteEntry.id);
-					remoteMetadata.files[path].isDeleted = true;
+			await this.runWithConcurrency(diff.toUpload, SYNC_IO_CONCURRENCY, async (path) => {
+				try {
+					const localFile = this.app.vault.getAbstractFileByPath(path);
+					const content = await this.readLocalFileForUpload(path, localFile instanceof TFile ? localFile : null);
+					const remoteEntry = remoteMetadata.files[path];
+					const remoteId = remoteEntry && !remoteEntry.isDeleted ? remoteEntry.id : undefined;
+					const uploaded = await this.gdrive.uploadFileByPath(folderId, path, content, remoteId);
+					remoteMetadata.files[path] = {
+						id: uploaded.id,
+						parentId: uploaded.parentId,
+						hash: localCurrent[path].hash,
+						modifiedTime: localCurrent[path].modifiedTime,
+						size: localCurrent[path].size,
+						isDeleted: false,
+						mimeType: 'text/markdown'
+					};
+				} finally {
+					advanceProgress();
 				}
-			}
+			});
+
+			await this.runWithConcurrency(diff.toDeleteRemote, SYNC_IO_CONCURRENCY, async (path) => {
+				try {
+					const remoteEntry = remoteMetadata.files[path];
+					if (remoteEntry?.id) {
+						await this.gdrive.deleteFile(remoteEntry.id);
+						remoteMetadata.files[path].isDeleted = true;
+					}
+				} finally {
+					advanceProgress();
+				}
+			});
 
 			if (hasChanges) {
 				remoteMetadata.lastSyncTimestamp = Date.now();
@@ -2045,9 +2234,8 @@ export default class SyncDrivePlugin extends Plugin {
 			await this.saveLocalState(remoteMetadata);
 			await this.updateVaultMetaOnSync(rootFolderId, folderId);
 
-			const finalScan = await this.scanLocalFiles(hashCacheState);
-			hashCacheState = finalScan.cache;
-			await this.saveLocalHashCache(hashCacheState);
+			const nextCache = this.buildHashCacheFromLocalCurrent(localCurrent, hashCacheState.fullScanAt);
+			await this.saveLocalHashCache(nextCache);
 			this.clearDelta();
 
 			new Notice("Sync complete!");
@@ -2079,6 +2267,7 @@ export default class SyncDrivePlugin extends Plugin {
 			this.debugLog("Force push started");
 			const folderId = await this.getVaultFolderId();
 			if (!folderId) return;
+			await this.loadFolderPathCache(folderId);
 			const remoteMetaInfo = await this.loadRemoteMetadata(folderId, { skipEncryptionTester: true });
 			let remoteMetadata = remoteMetaInfo.metadata;
 			const metadataFileId = remoteMetaInfo.fileId;
@@ -2088,7 +2277,7 @@ export default class SyncDrivePlugin extends Plugin {
 				metadataEtag = null;
 			}
 
-			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.gdrive.listFilesRecursive(folderId));
+			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.getRemoteFilesForForceOps(folderId));
 			const localFileMap = await this.buildLocalFileMap();
 			const localPaths = Array.from(localFileMap.keys()).filter(path => !this.isPathExcluded(path));
 			const localPathSet = new Set(localPaths);
@@ -2099,6 +2288,28 @@ export default class SyncDrivePlugin extends Plugin {
 					remoteFileByPath.set(remotePath, remoteFile);
 				}
 			}
+			const remoteDeleteCandidates = remoteFiles.filter(remoteFile => {
+				const remotePath = this.getRemoteFilePath(remoteFile);
+				if (!remotePath || localPathSet.has(remotePath)) return false;
+				return remoteFile.capabilities?.canDelete !== false;
+			});
+			const uploadPaths = localPaths.filter(path => {
+				const remoteFile = remoteFileByPath.get(path);
+				return !remoteFile || remoteFile.capabilities?.canEdit !== false;
+			});
+			const totalSteps = remoteDeleteCandidates.length + uploadPaths.length;
+			let completedSteps = 0;
+			const advanceProgress = () => {
+				completedSteps += 1;
+				this.updateSyncProgress(completedSteps, totalSteps);
+			};
+			if (totalSteps > 0) {
+				this.updateSyncProgress(0, totalSteps);
+			} else {
+				this.updateSyncProgress(0, 0);
+			}
+
+			await this.ensureRemoteFolders(folderId, uploadPaths.map(path => this.getPathDir(path)));
 
 			this.debugLog("Force push counts", { folderId, remote: remoteFiles.length, local: localPaths.length });
 
@@ -2107,31 +2318,31 @@ export default class SyncDrivePlugin extends Plugin {
 			const uploadedIds: Record<string, { id: string; parentId: string }> = {};
 
 			// Delete remote files that don't exist locally
-			for (const remoteFile of remoteFiles) {
-				const remotePath = this.getRemoteFilePath(remoteFile);
-				if (remotePath && !localPathSet.has(remotePath)) {
-					if (remoteFile.capabilities?.canDelete) {
+			await this.runWithConcurrency(remoteDeleteCandidates, SYNC_IO_CONCURRENCY, async (remoteFile) => {
+				try {
+					const remotePath = this.getRemoteFilePath(remoteFile);
+					if (remotePath) {
 						await this.gdrive.deleteFile(remoteFile.id);
-					} else {
-						console.warn(`Cannot delete remote file ${remotePath} (insufficient permissions)`);
 					}
+				} finally {
+					advanceProgress();
 				}
-			}
+			});
 
-			for (const path of localPaths) {
-				const localFile = localFileMap.get(path) || null;
-				const remoteFile = remoteFileByPath.get(path);
-				if (remoteFile && !remoteFile.capabilities?.canEdit) {
-					console.warn(`Cannot update remote file ${path} (insufficient permissions). Skipping.`);
-					continue;
+			await this.runWithConcurrency(uploadPaths, SYNC_IO_CONCURRENCY, async (path) => {
+				try {
+					const localFile = localFileMap.get(path) || null;
+					const remoteFile = remoteFileByPath.get(path);
+					const content = await this.readLocalFileForUpload(path, localFile instanceof TFile ? localFile : null);
+					const uploaded = await this.gdrive.uploadFileByPath(folderId, path, content, remoteFile?.id);
+					uploadedIds[path] = { id: uploaded.id, parentId: uploaded.parentId };
+				} finally {
+					advanceProgress();
 				}
-				const content = await this.readLocalFileForUpload(path, localFile instanceof TFile ? localFile : null);
-				const uploaded = await this.gdrive.uploadFileByPath(folderId, path, content, remoteFile?.id);
-				uploadedIds[path] = { id: uploaded.id, parentId: uploaded.parentId };
-			}
+			});
 
 			const hashCache = await this.loadLocalHashCache();
-			const scan = await this.scanLocalFiles(hashCache);
+			const scan = await this.scanLocalFiles(hashCache, { trigger: 'manual', forceFull: true });
 			const localCurrent = scan.files;
 			const hashCacheState = scan.cache;
 			const baseMetadata: RemoteMetadataFile = remoteMetadata || {
@@ -2222,43 +2433,64 @@ export default class SyncDrivePlugin extends Plugin {
 			let metadataFileId = remoteMetaInfo.fileId;
 			let metadataEtag = remoteMetaInfo.etag;
 
-			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.gdrive.listFilesRecursive(folderId));
+			const remoteFiles = this.filterRemoteVaultFilesForSync(await this.getRemoteFilesForForceOps(folderId));
 			this.debugLog("Force pull remote count", remoteFiles.length);
 
 			new Notice("Force pulling remote to local...");
 
 			const localFileMap = await this.buildLocalFileMap();
 			const localPaths = Array.from(localFileMap.keys()).filter(path => !this.isPathExcluded(path));
-			const remotePathSet = new Set(remoteFiles.map(file => this.getRemoteFilePath(file)).filter(Boolean));
+			const remoteFilesWithPath = remoteFiles
+				.map(file => ({ file, path: this.getRemoteFilePath(file) }))
+				.filter(entry => !!entry.path);
+			const remotePathSet = new Set(remoteFilesWithPath.map(entry => entry.path as string));
+			const localPathsToDelete = localPaths.filter(path => !remotePathSet.has(path));
+			const totalSteps = localPathsToDelete.length + remoteFilesWithPath.length;
+			let completedSteps = 0;
+			const advanceProgress = () => {
+				completedSteps += 1;
+				this.updateSyncProgress(completedSteps, totalSteps);
+			};
+			if (totalSteps > 0) {
+				this.updateSyncProgress(0, totalSteps);
+			} else {
+				this.updateSyncProgress(0, 0);
+			}
 			const configPrefix = this.getConfigDirPrefix();
 			// Delete local files that don't exist remotely
-			for (const path of localPaths) {
-				if (!remotePathSet.has(path)) {
+			await this.runWithConcurrency(localPathsToDelete, SYNC_IO_CONCURRENCY, async (path) => {
+				try {
 					const localFile = localFileMap.get(path) || null;
 					if (localFile instanceof TFile) {
 						await this.app.vault.delete(localFile);
 					} else {
 						await this.app.vault.adapter.remove(path);
 					}
+				} finally {
+					advanceProgress();
 				}
-			}
+			});
 
-			for (const remoteFile of remoteFiles) {
-				const remotePath = this.getRemoteFilePath(remoteFile);
-				if (!remotePath) continue;
-				const content = await this.gdrive.downloadFile(remoteFile.id);
-				const decrypted = await this.decryptContentOrThrow(content);
-				await this.ensureLocalFolderForPath(remotePath);
-				const localFile = this.app.vault.getAbstractFileByPath(remotePath);
+			await this.runWithConcurrency(remoteFilesWithPath, SYNC_IO_CONCURRENCY, async (entry) => {
+				try {
+					const remoteFile = entry.file;
+					const remotePath = entry.path as string;
+					const content = await this.gdrive.downloadFile(remoteFile.id);
+					const decrypted = await this.decryptContentOrThrow(content);
+					await this.ensureLocalFolderForPath(remotePath);
+					const localFile = this.app.vault.getAbstractFileByPath(remotePath);
 
-				if (localFile instanceof TFile) {
-					await this.app.vault.modifyBinary(localFile, decrypted);
-				} else if (remotePath.startsWith(configPrefix)) {
-					await this.app.vault.adapter.writeBinary(remotePath, decrypted);
-				} else {
-					await this.app.vault.createBinary(remotePath, decrypted);
+					if (localFile instanceof TFile) {
+						await this.app.vault.modifyBinary(localFile, decrypted);
+					} else if (remotePath.startsWith(configPrefix)) {
+						await this.app.vault.adapter.writeBinary(remotePath, decrypted);
+					} else {
+						await this.app.vault.createBinary(remotePath, decrypted);
+					}
+				} finally {
+					advanceProgress();
 				}
-			}
+			});
 
 			const newMetadata = await this.buildRemoteMetadataFromDrive(folderId);
 			newMetadata.lastSyncTimestamp = Date.now();
@@ -2276,7 +2508,7 @@ export default class SyncDrivePlugin extends Plugin {
 			);
 
 			const hashCache = await this.loadLocalHashCache();
-			const scan = await this.scanLocalFiles(hashCache);
+			const scan = await this.scanLocalFiles(hashCache, { trigger: 'manual', forceFull: true });
 			const hashCacheState = scan.cache;
 
 			await this.saveLocalState(newMetadata);
@@ -2444,6 +2676,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 		this.plugin.setSyncActionStateListener(null);
+		this.plugin.setSyncProgressListener(null);
 
 		containerEl.createEl('h2', { text: 'Sync Drive Settings' });
 
@@ -2458,6 +2691,9 @@ class SyncDriveSettingTab extends PluginSettingTab {
 		let forcePushButtonText = 'Force push';
 		let forcePullButtonEl: HTMLButtonElement | null = null;
 		let forcePullButtonText = 'Force pull';
+		let syncProgressWrapEl: HTMLDivElement | null = null;
+		let syncProgressBarEl: HTMLProgressElement | null = null;
+		let syncProgressTextEl: HTMLDivElement | null = null;
 		const hasVaultSelection = () => {
 			const trimmedName = (this.plugin.settings.currentVaultName || '').trim();
 			return trimmedName.length > 0 || !!this.plugin.settings.currentVaultId;
@@ -2500,6 +2736,18 @@ class SyncDriveSettingTab extends PluginSettingTab {
 			setActionButtonLoading(syncNowButtonEl, action === 'sync', 'Syncing...', syncNowButtonText);
 			setActionButtonLoading(forcePushButtonEl, action === 'forcePush', 'Force pushing...', forcePushButtonText);
 			setActionButtonLoading(forcePullButtonEl, action === 'forcePull', 'Force pulling...', forcePullButtonText);
+		};
+		const applySyncProgressUiState = (state: SyncProgressState) => {
+			if (!syncProgressWrapEl || !syncProgressBarEl || !syncProgressTextEl) return;
+			const { current, total, action } = state;
+			const shouldShow = !!action;
+			syncProgressWrapEl.style.display = shouldShow ? 'flex' : 'none';
+			if (!shouldShow) return;
+			const safeTotal = Math.max(total, 1);
+			const safeCurrent = Math.min(current, total);
+			syncProgressBarEl.max = safeTotal;
+			syncProgressBarEl.value = safeCurrent;
+			syncProgressTextEl.textContent = `${safeCurrent}/${total}`;
 		};
 		const maybePromptEncryptionKeyChange = () => {
 			if (encryptionKeyPromptOpen) return;
@@ -2662,7 +2910,7 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					});
 				});
 
-			registerVaultGate(new Setting(containerEl))
+			const manualSyncSetting = registerVaultGate(new Setting(containerEl))
 				.setName('Manual sync')
 				.setDesc('Run sync actions on demand.')
 				.addButton(button => {
@@ -2694,11 +2942,22 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					forcePullButtonText = forcePullButtonEl.textContent || forcePullButtonText;
 				});
 
+			manualSyncSetting.controlEl.addClass('sync-drive-manual-controls');
+			syncProgressWrapEl = manualSyncSetting.controlEl.createDiv({ cls: 'sync-drive-manual-progress' });
+			syncProgressBarEl = syncProgressWrapEl.createEl('progress', { cls: 'sync-drive-manual-progress-bar' });
+			syncProgressTextEl = syncProgressWrapEl.createEl('div', { cls: 'sync-drive-manual-progress-text' });
+			syncProgressWrapEl.style.display = 'none';
+
 			this.plugin.setSyncActionStateListener((inProgress, action) => {
 				if (syncNowButtonEl && !syncNowButtonEl.isConnected) return;
 				applySyncActionUiState(inProgress, action);
 			});
+			this.plugin.setSyncProgressListener((state) => {
+				if (syncProgressWrapEl && !syncProgressWrapEl.isConnected) return;
+				applySyncProgressUiState(state);
+			});
 			applySyncActionUiState(this.plugin.isSyncActionInProgress(), this.plugin.getSyncActionType());
+			applySyncProgressUiState(this.plugin.getSyncProgressState());
 		}
 
 		let autoSyncInputEl: HTMLInputElement | null = null;

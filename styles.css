@@ -27,6 +27,30 @@
     animation: sync-drive-spin 1s linear infinite;
 }
 
+.sync-drive-manual-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    flex-basis: 100%;
+}
+
+.sync-drive-manual-controls {
+    flex-wrap: wrap;
+}
+
+.sync-drive-manual-progress-bar {
+    flex: 1;
+    height: 6px;
+}
+
+.sync-drive-manual-progress-text {
+    font-size: 0.85em;
+    color: var(--text-muted);
+    min-width: 56px;
+    text-align: right;
+}
+
 @keyframes sync-drive-spin {
     from {
         transform: rotate(0deg);
