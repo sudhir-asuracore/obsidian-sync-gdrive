@@ -15,11 +15,26 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 const pluginId = manifest.id;
 const distDir = path.resolve("dist", pluginId);
 
-// Get destination directory from environment variable
-const destDirs = process.env.OBSIDIAN_PLUGIN_DEST ? process.env.OBSIDIAN_PLUGIN_DEST.split(",").map(d => d.trim()) : [];
+// Get destination directories from environment variables
+const destPrefix = (process.env.OBSIDIAN_PLUGIN_DEST_PREFIX || "").trim();
+const destNamesRaw = (process.env.OBSIDIAN_PLUGIN_DEST_NAMES || "").trim();
+const destSuffix = (process.env.OBSIDIAN_PLUGIN_DEST_SUFFIX || "").trim();
+
+let destDirs = [];
+if (destNamesRaw) {
+  destDirs = destNamesRaw
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .map((name) => `${destPrefix}${name}${destSuffix}`);
+}
+
+if (destDirs.length === 0 && process.env.OBSIDIAN_PLUGIN_DEST) {
+  destDirs = process.env.OBSIDIAN_PLUGIN_DEST.split(",").map((dir) => dir.trim()).filter(Boolean);
+}
 
 if (destDirs.length === 0) {
-  console.error("Error: OBSIDIAN_PLUGIN_DEST is not defined in .env file.");
+  console.error("Error: OBSIDIAN_PLUGIN_DEST_PREFIX/OBSIDIAN_PLUGIN_DEST_NAMES/OBSIDIAN_PLUGIN_DEST_SUFFIX are not defined in .env file.");
   process.exit(1);
 }
 

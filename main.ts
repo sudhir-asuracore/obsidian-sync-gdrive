@@ -19,6 +19,7 @@ interface SyncDriveSettings {
 	syncVideos: boolean;
 	syncPdfs: boolean;
 	syncAppearanceSettings: boolean;
+	syncCoreSettings: boolean;
 	syncThemesAndSnippets: boolean;
 	syncPlugins: boolean;
 	syncHotkeys: boolean;
@@ -42,6 +43,7 @@ const DEFAULT_SETTINGS: SyncDriveSettings = {
 	syncVideos: true,
 	syncPdfs: true,
 	syncAppearanceSettings: true,
+	syncCoreSettings: true,
 	syncThemesAndSnippets: true,
 	syncPlugins: true,
 	syncHotkeys: true,
@@ -62,6 +64,13 @@ const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'mkv', 'webm', 'avi', 'mp
 const APPEARANCE_SETTING_FILES = new Set([
 	'appearance.json',
 	'snippets.json'
+]);
+const CORE_SETTING_FILES = new Set([
+	'app.json',
+	'graph.json',
+	'templates.json',
+	'workspace.json',
+	'workspace-mobile.json'
 ]);
 const SYNC_IO_CONCURRENCY = 4;
 const DRIVE_LIST_CONCURRENCY = 4;
@@ -426,6 +435,7 @@ export default class SyncDrivePlugin extends Plugin {
 	private shouldIncludeConfigFiles(): boolean {
 		return !!(
 			this.settings.syncAppearanceSettings
+			|| this.settings.syncCoreSettings
 			|| this.settings.syncThemesAndSnippets
 			|| this.settings.syncPlugins
 			|| this.settings.syncHotkeys
@@ -520,6 +530,18 @@ export default class SyncDrivePlugin extends Plugin {
 				return false;
 			}
 			return true;
+		}
+		if (this.settings.syncCoreSettings) {
+			if (CORE_SETTING_FILES.has(relative)) {
+				return true;
+			}
+			if (relative.endsWith('.json') && !relative.includes('/')) {
+				if (!APPEARANCE_SETTING_FILES.has(relative)
+					&& relative !== 'hotkeys.json'
+					&& !relative.endsWith('-plugins.json')) {
+					return true;
+				}
+			}
 		}
 		return false;
 	}
@@ -1960,6 +1982,7 @@ export default class SyncDrivePlugin extends Plugin {
 		this.setSyncingIndicator(true);
 		try {
 			this.debugLog("Sync started");
+			new Notice("Sync: detecting changes");
 			const rootFolderId = await this.getRootFolderId();
 			if (!rootFolderId) return;
 
@@ -3107,6 +3130,18 @@ class SyncDriveSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.syncAppearanceSettings)
 					.onChange(async (value) => {
 						this.plugin.settings.syncAppearanceSettings = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		registerVaultGate(new Setting(containerEl))
+			.setName('Core')
+			.setDesc('Sync settings related to app, workspace, graph.')
+			.addToggle(toggle => {
+				toggle
+					.setValue(this.plugin.settings.syncCoreSettings)
+					.onChange(async (value) => {
+						this.plugin.settings.syncCoreSettings = value;
 						await this.plugin.saveSettings();
 					});
 			});
