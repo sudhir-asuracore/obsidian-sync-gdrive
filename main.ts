@@ -409,7 +409,7 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private normalizePath(path: string): string {
-		return path.replace(/\\/g, '/');
+		return path.replace(/\\/g, '/').split('/').map(part => part.replace(/[:*?"<>|]/g, '_')).join('/');
 	}
 
 	private getPathDir(path: string): string {
@@ -470,14 +470,15 @@ export default class SyncDrivePlugin extends Plugin {
 	private async buildLocalFileMap(): Promise<Map<string, TFile | null>> {
 		const map = new Map<string, TFile | null>();
 		for (const localFile of this.app.vault.getFiles()) {
-			map.set(localFile.path, localFile);
+			map.set(this.normalizePath(localFile.path), localFile);
 		}
 
 		if (this.shouldIncludeConfigFiles()) {
 			const configFiles = await this.listConfigDirFiles();
 			for (const path of configFiles) {
-				if (!map.has(path)) {
-					map.set(path, null);
+				const normalized = this.normalizePath(path);
+				if (!map.has(normalized)) {
+					map.set(normalized, null);
 				}
 			}
 		}
@@ -698,12 +699,22 @@ export default class SyncDrivePlugin extends Plugin {
 				const raw = await this.app.vault.adapter.read(scopedPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
+					const normalizedFiles: Record<string, LocalStateEntry> = {};
+					for (const [p, entry] of Object.entries(parsed.files)) {
+						normalizedFiles[this.normalizePath(p)] = entry as LocalStateEntry;
+					}
+					parsed.files = normalizedFiles;
 					return parsed as LocalStateFile;
 				}
 			} else if (await this.app.vault.adapter.exists(legacyPath)) {
 				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
+					const normalizedFiles: Record<string, LocalStateEntry> = {};
+					for (const [p, entry] of Object.entries(parsed.files)) {
+						normalizedFiles[this.normalizePath(p)] = entry as LocalStateEntry;
+					}
+					parsed.files = normalizedFiles;
 					return parsed as LocalStateFile;
 				}
 			}
@@ -734,12 +745,22 @@ export default class SyncDrivePlugin extends Plugin {
 				const raw = await this.app.vault.adapter.read(scopedPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
+					const normalizedFiles: Record<string, LocalHashCacheEntry> = {};
+					for (const [p, entry] of Object.entries(parsed.files)) {
+						normalizedFiles[this.normalizePath(p)] = entry as LocalHashCacheEntry;
+					}
+					parsed.files = normalizedFiles;
 					return parsed as LocalHashCacheFile;
 				}
 			} else if (await this.app.vault.adapter.exists(legacyPath)) {
 				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
+					const normalizedFiles: Record<string, LocalHashCacheEntry> = {};
+					for (const [p, entry] of Object.entries(parsed.files)) {
+						normalizedFiles[this.normalizePath(p)] = entry as LocalHashCacheEntry;
+					}
+					parsed.files = normalizedFiles;
 					return parsed as LocalHashCacheFile;
 				}
 			}
@@ -818,6 +839,20 @@ export default class SyncDrivePlugin extends Plugin {
 				const raw = await this.app.vault.adapter.read(path);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === REMOTE_CACHE_SCHEMA_VERSION && parsed.rootFolderId === rootFolderId) {
+					if (parsed.files) {
+						const normalizedFiles: Record<string, RemoteFileCacheEntry> = {};
+						for (const [p, entry] of Object.entries(parsed.files)) {
+							normalizedFiles[p] = { ...(entry as any), path: this.normalizePath((entry as any).path) };
+						}
+						parsed.files = normalizedFiles;
+					}
+					if (parsed.folders) {
+						const normalizedFolders: Record<string, RemoteFolderCacheEntry> = {};
+						for (const [id, entry] of Object.entries(parsed.folders)) {
+							normalizedFolders[id] = { ...(entry as any), path: this.normalizePath((entry as any).path) };
+						}
+						parsed.folders = normalizedFolders;
+					}
 					return parsed as RemoteFileCacheFile;
 				}
 			}
@@ -910,53 +945,55 @@ export default class SyncDrivePlugin extends Plugin {
 			const isFolder = mimeType === 'application/vnd.google-apps.folder';
 			const parentId = Array.isArray(file.parents) && file.parents.length > 0 ? file.parents[0] : undefined;
 			const parentEntry = parentId && parentId !== rootFolderId ? cache.folders[parentId] : undefined;
-			const parentPath = parentEntry ? parentEntry.path : '';
-			if (isFolder) {
-				if (file.trashed) {
-					if (cache.folders[fileId]) {
+				const parentPath = parentEntry ? parentEntry.path : '';
+				if (isFolder) {
+					if (file.trashed) {
+						if (cache.folders[fileId]) {
+							needsFullRefresh = true;
+							break;
+						}
+						continue;
+					}
+					if (parentId && parentId !== rootFolderId && !parentEntry) {
+						if (cache.folders[fileId]) {
+							needsFullRefresh = true;
+							break;
+						}
+						continue;
+					}
+					const sanitizedName = this.normalizePath(file.name);
+					const folderPath = parentPath ? `${parentPath}/${sanitizedName}` : sanitizedName;
+					const existing = cache.folders[fileId];
+					if (existing && existing.path !== folderPath) {
 						needsFullRefresh = true;
 						break;
 					}
+					cache.folders[fileId] = {
+						id: fileId,
+						name: file.name,
+						parentId: parentId,
+						path: folderPath
+					};
+					continue;
+				}
+				if (file.trashed) {
+					delete cache.files[fileId];
 					continue;
 				}
 				if (parentId && parentId !== rootFolderId && !parentEntry) {
-					if (cache.folders[fileId]) {
+					if (cache.files[fileId]) {
 						needsFullRefresh = true;
 						break;
 					}
 					continue;
 				}
-				const folderPath = parentPath ? `${parentPath}/${file.name}` : file.name;
-				const existing = cache.folders[fileId];
-				if (existing && existing.path !== folderPath) {
-					needsFullRefresh = true;
-					break;
-				}
-				cache.folders[fileId] = {
+				const sanitizedName = this.normalizePath(file.name);
+				const path = parentPath ? `${parentPath}/${sanitizedName}` : sanitizedName;
+				cache.files[fileId] = {
 					id: fileId,
 					name: file.name,
+					path,
 					parentId: parentId,
-					path: folderPath
-				};
-				continue;
-			}
-			if (file.trashed) {
-				delete cache.files[fileId];
-				continue;
-			}
-			if (parentId && parentId !== rootFolderId && !parentEntry) {
-				if (cache.files[fileId]) {
-					needsFullRefresh = true;
-					break;
-				}
-				continue;
-			}
-			const path = parentPath ? `${parentPath}/${file.name}` : file.name;
-			cache.files[fileId] = {
-				id: fileId,
-				name: file.name,
-				path,
-				parentId: parentId,
 				mimeType: mimeType,
 				modifiedTime: file.modifiedTime,
 				md5Checksum: file.md5Checksum,
@@ -1000,13 +1037,13 @@ export default class SyncDrivePlugin extends Plugin {
 				const raw = await this.app.vault.adapter.read(scopedPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && Array.isArray(parsed.paths)) {
-					this.deltaDirtyPaths = new Set(parsed.paths);
+					this.deltaDirtyPaths = new Set(parsed.paths.map(p => this.normalizePath(p)));
 				}
 			} else if (await this.app.vault.adapter.exists(legacyPath)) {
 				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && Array.isArray(parsed.paths)) {
-					this.deltaDirtyPaths = new Set(parsed.paths);
+					this.deltaDirtyPaths = new Set(parsed.paths.map(p => this.normalizePath(p)));
 				}
 			}
 		} catch (e) {
@@ -1326,6 +1363,11 @@ export default class SyncDrivePlugin extends Plugin {
 				if (!options?.skipEncryptionTester) {
 					await this.verifyEncryptionTester(parsed as RemoteMetadataFile);
 				}
+				const normalizedFiles: Record<string, RemoteMetadataEntry> = {};
+				for (const [p, entry] of Object.entries(parsed.files)) {
+					normalizedFiles[this.normalizePath(p)] = entry as RemoteMetadataEntry;
+				}
+				parsed.files = normalizedFiles;
 				return { metadata: parsed as RemoteMetadataFile, fileId: metadataFile.id, version: version, etag: etag };
 			}
 		} catch (e: any) {
