@@ -699,9 +699,9 @@ export default class SyncDrivePlugin extends Plugin {
 				const raw = await this.app.vault.adapter.read(scopedPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
-					const normalizedFiles: Record<string, LocalStateEntry> = {};
+					const normalizedFiles: Record<string, RemoteMetadataEntry> = {};
 					for (const [p, entry] of Object.entries(parsed.files)) {
-						normalizedFiles[this.normalizePath(p)] = entry as LocalStateEntry;
+						normalizedFiles[this.normalizePath(p)] = entry as RemoteMetadataEntry;
 					}
 					parsed.files = normalizedFiles;
 					return parsed as LocalStateFile;
@@ -710,9 +710,9 @@ export default class SyncDrivePlugin extends Plugin {
 				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && parsed.schemaVersion === 1 && parsed.files) {
-					const normalizedFiles: Record<string, LocalStateEntry> = {};
+					const normalizedFiles: Record<string, RemoteMetadataEntry> = {};
 					for (const [p, entry] of Object.entries(parsed.files)) {
-						normalizedFiles[this.normalizePath(p)] = entry as LocalStateEntry;
+						normalizedFiles[this.normalizePath(p)] = entry as RemoteMetadataEntry;
 					}
 					parsed.files = normalizedFiles;
 					return parsed as LocalStateFile;
@@ -1037,13 +1037,13 @@ export default class SyncDrivePlugin extends Plugin {
 				const raw = await this.app.vault.adapter.read(scopedPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && Array.isArray(parsed.paths)) {
-					this.deltaDirtyPaths = new Set(parsed.paths.map(p => this.normalizePath(p)));
+					this.deltaDirtyPaths = new Set(parsed.paths.map((p: string) => this.normalizePath(p)));
 				}
 			} else if (await this.app.vault.adapter.exists(legacyPath)) {
 				const raw = await this.app.vault.adapter.read(legacyPath);
 				const parsed = JSON.parse(raw);
 				if (parsed && Array.isArray(parsed.paths)) {
-					this.deltaDirtyPaths = new Set(parsed.paths.map(p => this.normalizePath(p)));
+					this.deltaDirtyPaths = new Set(parsed.paths.map((p: string) => this.normalizePath(p)));
 				}
 			}
 		} catch (e) {
