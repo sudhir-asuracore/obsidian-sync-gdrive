@@ -16,6 +16,7 @@ export class GDriveHelper {
     private refreshToken: string;
     private debugEnabled = false;
     private folderPathCache = new Map<string, string>();
+    private onAuthTimeout?: () => void;
 
     constructor(accessToken: string, refreshToken: string) {
         this.accessToken = accessToken;
@@ -53,8 +54,20 @@ export class GDriveHelper {
         this.folderPathCache = new Map(Object.entries(entries || {}));
     }
 
+    setOnAuthTimeout(callback: () => void) {
+        this.onAuthTimeout = callback;
+    }
+
     async refreshAccessToken(): Promise<string> {
+        const triggerTimeout = () => {
+            if (this.onAuthTimeout) {
+                this.onAuthTimeout();
+            }
+        };
+
         if (!this.refreshToken) {
+            this.debugLog("Refresh token missing");
+            triggerTimeout();
             throw new Error("No refresh token available");
         }
 
@@ -62,24 +75,35 @@ export class GDriveHelper {
             hasClientId: !!process.env.GOOGLE_CLIENT_ID,
             hasClientSecret: !!process.env.GOOGLE_CLIENT_SECRET
         });
-        const response = await requestUrl({
-            url: 'https://oauth2.googleapis.com/token',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            body: `client_id=${process.env.GOOGLE_CLIENT_ID}&client_secret=${process.env.GOOGLE_CLIENT_SECRET}&refresh_token=${this.refreshToken}&grant_type=refresh_token`
-        });
 
-        if (response.status !== 200) {
-            this.debugLog("Refresh token failed", { status: response.status, body: response.text });
-            throw new Error(`Failed to refresh token: ${response.text}`);
+        try {
+            const response = await requestUrl({
+                url: 'https://oauth2.googleapis.com/token',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: `client_id=${process.env.GOOGLE_CLIENT_ID}&client_secret=${process.env.GOOGLE_CLIENT_SECRET}&refresh_token=${this.refreshToken}&grant_type=refresh_token`,
+                throw: false
+            });
+
+            if (response.status !== 200) {
+                this.debugLog("Refresh token failed", { status: response.status, body: response.text });
+                triggerTimeout();
+                throw new Error(`Failed to refresh token: ${response.text}`);
+            }
+
+            const data: GoogleTokenResponse = response.json;
+            this.accessToken = data.access_token;
+            this.debugLog("Access token refreshed");
+            return this.accessToken;
+        } catch (e: any) {
+            this.debugLog("Error during token refresh", e);
+            if (e.message && (e.message.includes("400") || e.message.includes("401"))) {
+                triggerTimeout();
+            }
+            throw e;
         }
-
-        const data: GoogleTokenResponse = response.json;
-        this.accessToken = data.access_token;
-        this.debugLog("Access token refreshed");
-        return this.accessToken;
     }
 
     async apiRequest(params: RequestUrlParam, retry = true): Promise<any> {
@@ -94,10 +118,16 @@ export class GDriveHelper {
         this.debugLog("API request", { method: params.method, url: params.url, retry, headerKeys });
         const response = await requestUrl(params);
 
-        if (response.status === 401 && retry && this.refreshToken) {
-            this.debugLog("Received 401, attempting token refresh");
-            await this.refreshAccessToken();
-            return this.apiRequest(params, false);
+        if (response.status === 401) {
+            if (retry && this.refreshToken) {
+                this.debugLog("Received 401, attempting token refresh");
+                await this.refreshAccessToken();
+                return this.apiRequest(params, false);
+            } else {
+                if (this.onAuthTimeout) {
+                    this.onAuthTimeout();
+                }
+            }
         }
 
         if (response.status >= 400) {
@@ -117,10 +147,16 @@ export class GDriveHelper {
         }
 
         const response = await requestUrl(params);
-        if (response.status === 401 && retry && this.refreshToken) {
-            this.debugLog("Received 401, attempting token refresh");
-            await this.refreshAccessToken();
-            return this.requestUrlWithAuth(params, false);
+        if (response.status === 401) {
+            if (retry && this.refreshToken) {
+                this.debugLog("Received 401, attempting token refresh");
+                await this.refreshAccessToken();
+                return this.requestUrlWithAuth(params, false);
+            } else {
+                if (this.onAuthTimeout) {
+                    this.onAuthTimeout();
+                }
+            }
         }
 
         if (response.status >= 400) {

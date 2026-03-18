@@ -409,7 +409,7 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private normalizePath(path: string): string {
-		return path.replace(/\\/g, '/').split('/').map(part => part.replace(/[:*?"<>|]/g, '_')).join('/');
+		return path.replace(/\\/g, '/').split('/').map(part => part.trim().replace(/[:*?"<>|]/g, '_').replace(/[\x00-\x1f\x7f]/g, '_')).filter(Boolean).join('/');
 	}
 
 	private getPathDir(path: string): string {
@@ -1739,13 +1739,17 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private getConflictPath(originalPath: string): string {
-		const dot = originalPath.lastIndexOf('.');
+		const dir = this.getPathDir(originalPath);
+		const base = this.getPathBase(originalPath);
+		const dot = base.lastIndexOf('.');
 		if (dot > 0) {
-			const base = originalPath.slice(0, dot);
-			const ext = originalPath.slice(dot);
-			return `${base} (conflict copy: local)${ext}`;
+			const name = base.slice(0, dot);
+			const ext = base.slice(dot);
+			const conflictBase = `${name} (conflict copy: local)${ext}`;
+			return dir ? `${dir}/${conflictBase}` : conflictBase;
 		}
-		return `${originalPath} (conflict copy: local)`;
+		const conflictBase = `${base} (conflict copy: local)`;
+		return dir ? `${dir}/${conflictBase}` : conflictBase;
 	}
 
 	async onload() {
@@ -1756,6 +1760,7 @@ export default class SyncDrivePlugin extends Plugin {
 			this.settings.accessToken,
 			this.settings.refreshToken
 		);
+		this.gdrive.setOnAuthTimeout(() => this.showReauthenticateModal());
 		this.gdrive.setDebugEnabled(this.debugEnabled);
 
 		this.registerObsidianProtocolHandler("sync-drive", async (data: ObsidianProtocolData) => {
@@ -1798,6 +1803,7 @@ export default class SyncDrivePlugin extends Plugin {
 				this.settings.accessToken,
 				this.settings.refreshToken
 			);
+			this.gdrive.setOnAuthTimeout(() => this.showReauthenticateModal());
 			this.gdrive.setDebugEnabled(this.debugEnabled);
 		}
 		this.applyAutoSyncSettings();
@@ -1908,6 +1914,19 @@ export default class SyncDrivePlugin extends Plugin {
 
 		window.open(authUrl);
 		new Notice("Opening browser for authentication...");
+	}
+
+	private reauthModalShowing = false;
+
+	showReauthenticateModal() {
+		if (this.reauthModalShowing) return;
+		this.reauthModalShowing = true;
+		new ReauthenticateModal(this.app, async () => {
+			await this.logout();
+			await this.authenticate();
+		}, () => {
+			this.reauthModalShowing = false;
+		}).open();
 	}
 
 	async exchangeCodeForToken(code: string, clientId: string, clientSecret: string, redirectUri: string) {
@@ -2136,6 +2155,7 @@ export default class SyncDrivePlugin extends Plugin {
 			for (const rename of diff.renameLocal) {
 				const localFile = this.app.vault.getAbstractFileByPath(rename.from);
 				if (localFile instanceof TFile) {
+					await this.ensureLocalFolderForPath(rename.to);
 					await this.app.vault.rename(localFile, rename.to);
 					localCurrent[rename.to] = localCurrent[rename.from];
 					delete localCurrent[rename.from];
@@ -2688,6 +2708,40 @@ class OAuthModal extends Modal {
 	}
 }
 
+class ReauthenticateModal extends Modal {
+	onReauthenticate: () => void;
+	onCloseCallback: () => void;
+
+	constructor(app: App, onReauthenticate: () => void, onCloseCallback: () => void) {
+		super(app);
+		this.onReauthenticate = onReauthenticate;
+		this.onCloseCallback = onCloseCallback;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl("h2", { text: "Sync Drive: Refresh Authentication" });
+		contentEl.createEl("p", { text: "Your Google Drive session has timed out or the connection has been lost. To continue syncing your notes, please reauthenticate." });
+
+		const btnContainer = contentEl.createDiv({ cls: "sync-drive-modal-buttons" });
+		const cancelBtn = btnContainer.createEl("button", { text: "Cancel" });
+		const reauthBtn = btnContainer.createEl("button", { text: "Reauthenticate", cls: "mod-cta" });
+
+		reauthBtn.onclick = () => {
+			this.close();
+			this.onReauthenticate();
+		};
+		cancelBtn.onclick = () => {
+			this.close();
+		};
+	}
+
+	onClose() {
+		this.contentEl.empty();
+		this.onCloseCallback();
+	}
+}
+
 class EncryptionKeyChangeModal extends Modal {
 	onConfirm: () => void;
 	onCancel: () => void;
@@ -2705,8 +2759,8 @@ class EncryptionKeyChangeModal extends Modal {
 		contentEl.createEl("p", { text: "Changing the encryption key requires a force push to keep files consistent." });
 
 		const btnContainer = contentEl.createDiv({ cls: "sync-drive-modal-buttons" });
-		const forceBtn = btnContainer.createEl("button", { text: "Force Push", cls: "mod-cta" });
 		const cancelBtn = btnContainer.createEl("button", { text: "Cancel" });
+		const forceBtn = btnContainer.createEl("button", { text: "Force Push", cls: "mod-cta" });
 
 		forceBtn.onclick = () => {
 			this.didResolve = true;
