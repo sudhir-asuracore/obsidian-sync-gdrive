@@ -47,7 +47,7 @@ Sync Drive creates a root folder in Google Drive named `obsidian_notes`.
 Each vault you create or select becomes a subfolder under that root.
 
 If a sync conflict happens, the local file is renamed to:
-`<filename> (conflict copy: local).ext`
+`<filename> (conflicted copy).ext`
 and the remote version is downloaded.
 
 ## Data Flow (High Level)

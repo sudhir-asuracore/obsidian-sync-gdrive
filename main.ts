@@ -409,7 +409,11 @@ export default class SyncDrivePlugin extends Plugin {
 	}
 
 	private normalizePath(path: string): string {
-		return path.replace(/\\/g, '/').split('/').map(part => part.trim().replace(/[:*?"<>|]/g, '_').replace(/[\x00-\x1f\x7f]/g, '_')).filter(Boolean).join('/');
+		return path.replace(/\\/g, '/')
+			.split('/')
+			.map(part => part.trim().replace(/[\\/:*?"<>|]/g, '_').replace(/[\x00-\x1f\x7f]/g, '_').replace(/\.+$/, ''))
+			.filter(part => part && part !== '.' && part !== '..')
+			.join('/');
 	}
 
 	private getPathDir(path: string): string {
@@ -1672,8 +1676,39 @@ export default class SyncDrivePlugin extends Plugin {
 
 			const baseHash = baseEntry?.hash;
 			const baseModified = baseEntry?.modifiedTime;
-			const localChanged = localExists && (!baseExists || (baseHash ? localEntry.hash !== baseHash : baseModified ? localEntry.modifiedTime !== baseModified : true));
-			const remoteChanged = remoteExists && (!baseExists || (remoteEntry.hash && baseHash ? remoteEntry.hash !== baseHash : remoteEntry.modifiedTime !== baseModified));
+
+			let localChanged = false;
+			let localReason = '';
+			if (localExists) {
+				if (!baseExists) {
+					localChanged = true;
+					localReason = 'no base entry';
+				} else if (baseHash) {
+					localChanged = localEntry.hash !== baseHash;
+					if (localChanged) localReason = `hash mismatch (local: ${localEntry.hash}, base: ${baseHash})`;
+				} else if (baseModified) {
+					localChanged = localEntry.modifiedTime !== baseModified;
+					if (localChanged) localReason = `modified time mismatch (local: ${localEntry.modifiedTime}, base: ${baseModified})`;
+				} else {
+					localChanged = true;
+					localReason = 'no base hash or modified time';
+				}
+			}
+
+			let remoteChanged = false;
+			let remoteReason = '';
+			if (remoteExists) {
+				if (!baseExists) {
+					remoteChanged = true;
+					remoteReason = 'no base entry';
+				} else if (remoteEntry.hash && baseHash) {
+					remoteChanged = remoteEntry.hash !== baseHash;
+					if (remoteChanged) remoteReason = `hash mismatch (remote: ${remoteEntry.hash}, base: ${baseHash})`;
+				} else {
+					remoteChanged = remoteEntry.modifiedTime !== baseModified;
+					if (remoteChanged) remoteReason = `modified time mismatch (remote: ${remoteEntry.modifiedTime}, base: ${baseModified})`;
+				}
+			}
 
 			if (remoteDeleted && localExists) {
 				diff.toDeleteLocal.push(path);
@@ -1696,7 +1731,17 @@ export default class SyncDrivePlugin extends Plugin {
 			}
 
 			if (remoteExists && localExists) {
-				const isConflict = localChanged && remoteChanged;
+				let isConflict = localChanged && remoteChanged;
+
+				if (isConflict && localEntry.hash && remoteEntry.hash && localEntry.hash === remoteEntry.hash) {
+					if (this.debugEnabled) {
+						this.debugLog(`Conflict suppressed for ${path}: hashes match (${localEntry.hash})`);
+					}
+					isConflict = false;
+					localChanged = false;
+					remoteChanged = false;
+				}
+
 				let reason = 'no-change';
 				if (isConflict) {
 					reason = 'conflict-both-changed';
@@ -1705,16 +1750,20 @@ export default class SyncDrivePlugin extends Plugin {
 				} else if (localChanged && !remoteChanged) {
 					reason = 'upload-local-changed';
 				}
-				if (this.debugEnabled) {
+
+				if (this.debugEnabled && (isConflict || localChanged || remoteChanged)) {
 					this.debugLog("Diff decision", {
 						path,
 						local: localEntry,
 						remote: remoteEntry,
 						base: baseEntry,
 						conflict: isConflict,
-						reason
+						reason,
+						localReason,
+						remoteReason
 					});
 				}
+
 				if (isConflict) {
 					diff.conflicts.push(path);
 				} else if (remoteChanged && !localChanged) {
@@ -1742,14 +1791,16 @@ export default class SyncDrivePlugin extends Plugin {
 		const dir = this.getPathDir(originalPath);
 		const base = this.getPathBase(originalPath);
 		const dot = base.lastIndexOf('.');
+		let conflictBase: string;
 		if (dot > 0) {
 			const name = base.slice(0, dot);
 			const ext = base.slice(dot);
-			const conflictBase = `${name} (conflict copy: local)${ext}`;
-			return dir ? `${dir}/${conflictBase}` : conflictBase;
+			conflictBase = `${name} (conflicted copy)${ext}`;
+		} else {
+			conflictBase = `${base} (conflicted copy)`;
 		}
-		const conflictBase = `${base} (conflict copy: local)`;
-		return dir ? `${dir}/${conflictBase}` : conflictBase;
+		const fullPath = dir ? `${dir}/${conflictBase}` : conflictBase;
+		return this.normalizePath(fullPath);
 	}
 
 	async onload() {
