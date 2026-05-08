@@ -296,7 +296,7 @@ export class GDriveHelper {
     async findFilesByName(folderId: string, name: string): Promise<any[]> {
         const query = encodeURIComponent(`'${folderId}' in parents and name = '${name}' and trashed = false`);
         const data = await this.apiRequest({
-            url: `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id, name, mimeType, modifiedTime, md5Checksum, size, version, trashed)`,
+            url: `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id, name, mimeType, modifiedTime, md5Checksum, size, version, trashed, capabilities, parents)`,
             method: 'GET'
         });
 
@@ -578,23 +578,39 @@ export class GDriveHelper {
         };
     }
 
-    async downloadFile(fileId: string): Promise<ArrayBuffer> {
+    async downloadFile(fileId: string): Promise<ArrayBuffer | null> {
         this.debugLog("Downloading file", fileId);
-        const response = await this.requestUrlWithAuth({
-            url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-            method: 'GET'
-        });
+        try {
+            const response = await this.requestUrlWithAuth({
+                url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+                method: 'GET'
+            });
 
-        this.debugLog("Download response", { status: response.status });
-        return response.arrayBuffer;
+            this.debugLog("Download response", { status: response.status });
+            return response.arrayBuffer;
+        } catch (e: any) {
+            if (e.message && e.message.includes("403") && e.message.includes("appNotAuthorizedToFile")) {
+                this.debugLog("App not authorized to download file", fileId);
+                return null;
+            }
+            throw e;
+        }
     }
 
     async deleteFile(fileId: string): Promise<void> {
         this.debugLog("Deleting file", fileId);
-        await this.apiRequest({
-            url: `https://www.googleapis.com/drive/v3/files/${fileId}`,
-            method: 'DELETE'
-        });
+        try {
+            await this.apiRequest({
+                url: `https://www.googleapis.com/drive/v3/files/${fileId}`,
+                method: 'DELETE'
+            });
+        } catch (e: any) {
+            if (e.message && e.message.includes("403") && e.message.includes("appNotAuthorizedToFile")) {
+                this.debugLog("App not authorized to delete file", fileId);
+                return;
+            }
+            throw e;
+        }
     }
 
     async getUserInfo(): Promise<{ displayName?: string; emailAddress?: string }> {

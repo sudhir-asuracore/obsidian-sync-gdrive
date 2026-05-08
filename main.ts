@@ -1154,6 +1154,10 @@ export default class SyncDrivePlugin extends Plugin {
 
 		const version = metaFile.version ? String(metaFile.version) : null;
 		const data = await this.gdrive.downloadFile(metaFile.id);
+		if (!data) {
+			console.warn("Unauthorized to download vaults meta; treating as missing", metaFile.id);
+			return { meta: null, fileId: metaFile.id, version: version };
+		}
 		const raw = textDecoder.decode(data);
 		try {
 			const parsed = JSON.parse(raw);
@@ -1360,6 +1364,10 @@ export default class SyncDrivePlugin extends Plugin {
 		const version = metadataFile.version ? String(metadataFile.version) : null;
 		const etag = metadataFile.etag ? String(metadataFile.etag) : null;
 		const data = await this.gdrive.downloadFile(metadataFile.id);
+		if (!data) {
+			console.warn("Unauthorized to download remote metadata; treating as missing", metadataFile.id);
+			return { metadata: null, fileId: metadataFile.id || null, version: version, etag: etag };
+		}
 		const raw = textDecoder.decode(data);
 		try {
 			const parsed = JSON.parse(raw);
@@ -2235,6 +2243,10 @@ export default class SyncDrivePlugin extends Plugin {
 						return;
 					}
 					const content = await this.gdrive.downloadFile(remoteEntry.id);
+					if (!content) {
+						this.debugLog("Skipping unauthorized file during sync", path);
+						return;
+					}
 					const decrypted = await this.decryptContentOrThrow(content);
 					await this.ensureLocalFolderForPath(path);
 					const localFile = this.app.vault.getAbstractFileByPath(path);
@@ -2612,6 +2624,10 @@ export default class SyncDrivePlugin extends Plugin {
 					const remoteFile = entry.file;
 					const remotePath = entry.path as string;
 					const content = await this.gdrive.downloadFile(remoteFile.id);
+					if (!content) {
+						this.debugLog("Skipping unauthorized file during force pull", remotePath);
+						return;
+					}
 					const decrypted = await this.decryptContentOrThrow(content);
 					await this.ensureLocalFolderForPath(remotePath);
 					const localFile = this.app.vault.getAbstractFileByPath(remotePath);
