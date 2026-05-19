@@ -16,6 +16,7 @@ export class GDriveHelper {
     private refreshToken: string;
     private debugEnabled = false;
     private folderPathCache = new Map<string, string>();
+    private folderCreationPromises = new Map<string, Promise<string>>();
     private onAuthTimeout?: () => void;
 
     constructor(accessToken: string, refreshToken: string) {
@@ -313,20 +314,34 @@ export class GDriveHelper {
         let currentPath = '';
         const parts = normalized.split('/').filter(Boolean);
         for (const part of parts) {
+            const parentId = currentId;
             currentPath = currentPath ? `${currentPath}/${part}` : part;
             const cacheKey = `${rootFolderId}:${currentPath}`;
+            
             const cached = this.folderPathCache.get(cacheKey);
             if (cached) {
                 currentId = cached;
                 continue;
             }
 
-            let nextId = await this.getFolderIdInParent(currentId, part);
-            if (!nextId) {
-                nextId = await this.createFolder(part, currentId);
+            let creationPromise = this.folderCreationPromises.get(cacheKey);
+            if (!creationPromise) {
+                creationPromise = (async () => {
+                    let nextId = await this.getFolderIdInParent(parentId, part);
+                    if (!nextId) {
+                        nextId = await this.createFolder(part, parentId);
+                    }
+                    this.folderPathCache.set(cacheKey, nextId);
+                    return nextId;
+                })();
+                this.folderCreationPromises.set(cacheKey, creationPromise);
             }
-            this.folderPathCache.set(cacheKey, nextId);
-            currentId = nextId;
+
+            try {
+                currentId = await creationPromise;
+            } finally {
+                this.folderCreationPromises.delete(cacheKey);
+            }
         }
 
         return currentId;
