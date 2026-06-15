@@ -2,6 +2,7 @@ import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, requestUrl, TFil
 import { GDriveHelper } from './src/gdrive';
 import { EncryptionService } from './src/encryption';
 import { Md5Utils } from './src/utils/md5';
+import { ConflictResolveModal, Conflict } from './src/ui/ConflictResolveModal';
 
 const textDecoder = new TextDecoder('utf-8');
 
@@ -1313,7 +1314,8 @@ export default class SyncDrivePlugin extends Plugin {
 			return byName;
 		}
 
-		if (meta.vaults.length === 1) {
+		// Only automatically select the single vault if the user hasn't specified a different name
+		if (meta.vaults.length === 1 && !this.settings.currentVaultName) {
 			await this.setCurrentVault(meta.vaults[0]);
 			return meta.vaults[0];
 		}
@@ -1648,13 +1650,17 @@ export default class SyncDrivePlugin extends Plugin {
 			}
 		}
 
+		const renameRemoteSources = new Set<string>();
+		const renameRemoteTargets = new Set<string>();
 		for (const [path, entry] of Object.entries(localState.files)) {
 			if (!entry.id) continue;
 			if (!localCurrent[path]) {
 				const key = `${entry.hash}:${entry.size}`;
 				const candidatePath = localByHashSize.get(key);
-				if (candidatePath && remote.files[path] && remote.files[path].id === entry.id) {
+				if (candidatePath && remote.files[path] && !remote.files[path].isDeleted && remote.files[path].id === entry.id) {
 					diff.renameRemote.push({ id: entry.id, to: candidatePath });
+					renameRemoteSources.add(path);
+					renameRemoteTargets.add(candidatePath);
 				}
 			}
 		}
@@ -1669,7 +1675,7 @@ export default class SyncDrivePlugin extends Plugin {
 		]);
 
 			for (const path of paths) {
-				if (renameLocalSources.has(path) || renameLocalTargets.has(path)) {
+				if (renameLocalSources.has(path) || renameLocalTargets.has(path) || renameRemoteSources.has(path) || renameRemoteTargets.has(path)) {
 					continue;
 				}
 
@@ -1811,6 +1817,50 @@ export default class SyncDrivePlugin extends Plugin {
 		return this.normalizePath(fullPath);
 	}
 
+	private getPendingConflicts(): Conflict[] {
+		const conflicts: Conflict[] = [];
+		const files = this.app.vault.getFiles();
+		const CONFLICT_SUFFIX = ' (conflicted copy)';
+
+		for (const file of files) {
+			if (file.name.includes(CONFLICT_SUFFIX)) {
+				const dir = this.getPathDir(file.path);
+				const base = this.getPathBase(file.path);
+
+				// Reconstruct original name
+				const dot = base.lastIndexOf('.');
+				let originalBase: string;
+				if (dot > 0) {
+					const nameWithSuffix = base.slice(0, dot);
+					const ext = base.slice(dot);
+					if (nameWithSuffix.endsWith(CONFLICT_SUFFIX)) {
+						originalBase = nameWithSuffix.slice(0, -CONFLICT_SUFFIX.length) + ext;
+					} else {
+						continue; // Not a conflict file
+					}
+				} else {
+					if (base.endsWith(CONFLICT_SUFFIX)) {
+						originalBase = base.slice(0, -CONFLICT_SUFFIX.length);
+					} else {
+						continue; // Not a conflict file
+					}
+				}
+
+				const originalPath = dir ? `${dir}/${originalBase}` : originalBase;
+				const normalizedOriginalPath = this.normalizePath(originalPath);
+				const originalFile = this.app.vault.getAbstractFileByPath(normalizedOriginalPath);
+
+				if (originalFile instanceof TFile) {
+					conflicts.push({
+						path: normalizedOriginalPath,
+						conflictedPath: file.path
+					});
+				}
+			}
+		}
+		return conflicts;
+	}
+
 	async onload() {
 		await this.loadSettings();
 		this.setDebugEnabled(this.getDebugLoggingFromEnv());
@@ -1841,9 +1891,41 @@ export default class SyncDrivePlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'resolve-conflicts',
+			name: 'Sync Drive: Resolve Conflicts',
+			callback: () => {
+				const conflicts = this.getPendingConflicts();
+				if (conflicts.length > 0) {
+					new ConflictResolveModal(this.app, conflicts).open();
+				} else {
+					new Notice("No pending conflicts found.");
+				}
+			}
+		});
+
 		this.ribbonIconEl = this.addRibbonIcon('sync', 'Sync Drive', async () => {
 			await this.sync();
 		});
+
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (file instanceof TFile) {
+					const conflicts = this.getPendingConflicts();
+					const conflict = conflicts.find(c => c.path === file.path || c.conflictedPath === file.path);
+					if (conflict) {
+						menu.addItem((item) => {
+							item
+								.setTitle('Resolve Sync Conflict')
+								.setIcon('diff')
+								.onClick(() => {
+									new ConflictResolveModal(this.app, [conflict]).open();
+								});
+						});
+					}
+				}
+			})
+		);
 
 		this.addSettingTab(new SyncDriveSettingTab(this.app, this));
 		this.applyAutoSyncSettings();
@@ -2096,6 +2178,15 @@ export default class SyncDrivePlugin extends Plugin {
 			return;
 		}
 
+		const pendingConflicts = this.getPendingConflicts();
+		if (pendingConflicts.length > 0) {
+			new ConflictResolveModal(this.app, pendingConflicts).open();
+			if (trigger === 'manual') {
+				new Notice("Please resolve existing conflicts before syncing.");
+			}
+			return;
+		}
+
 		if (!this.tryBeginSyncAction('sync', trigger)) {
 			return;
 		}
@@ -2284,22 +2375,36 @@ export default class SyncDrivePlugin extends Plugin {
 			});
 
 			for (const rename of diff.renameRemote) {
-				const entryPath = Object.keys(remoteMetadata.files).find(p => remoteMetadata.files[p].id === rename.id);
-				const newParentPath = this.getPathDir(rename.to);
-				const newName = this.getPathBase(rename.to);
-				const newParentId = await this.gdrive.ensureFolderPath(folderId, newParentPath);
-				let oldParentId = entryPath ? remoteMetadata.files[entryPath]?.parentId : undefined;
-				if (!oldParentId) {
-					const parents = await this.gdrive.getFileParents(rename.id);
-					oldParentId = parents.length > 0 ? parents[0] : undefined;
-				}
-				await this.gdrive.moveFile(rename.id, newName, newParentId, oldParentId);
-				if (entryPath && entryPath !== rename.to) {
-					remoteMetadata.files[rename.to] = {
-						...remoteMetadata.files[entryPath],
-						parentId: newParentId
-					};
-					delete remoteMetadata.files[entryPath];
+				try {
+					const entryPath = Object.keys(remoteMetadata.files).find(p => remoteMetadata.files[p].id === rename.id);
+					const newParentPath = this.getPathDir(rename.to);
+					const newName = this.getPathBase(rename.to);
+					const newParentId = await this.gdrive.ensureFolderPath(folderId, newParentPath);
+					let oldParentId = entryPath ? remoteMetadata.files[entryPath]?.parentId : undefined;
+					if (!oldParentId) {
+						const parents = await this.gdrive.getFileParents(rename.id);
+						oldParentId = parents.length > 0 ? parents[0] : undefined;
+					}
+					await this.gdrive.moveFile(rename.id, newName, newParentId, oldParentId);
+					if (entryPath && entryPath !== rename.to) {
+						remoteMetadata.files[rename.to] = {
+							...remoteMetadata.files[entryPath],
+							parentId: newParentId
+						};
+						delete remoteMetadata.files[entryPath];
+					}
+				} catch (e: any) {
+					if (String(e.message || '').includes('404')) {
+						this.debugLog("Rename failed (404), falling back to upload", { id: rename.id, to: rename.to });
+						diff.toUpload.push(rename.to);
+						// Cleanup old entry if it existed
+						const entryPath = Object.keys(remoteMetadata.files).find(p => remoteMetadata.files[p].id === rename.id);
+						if (entryPath) {
+							delete remoteMetadata.files[entryPath];
+						}
+					} else {
+						throw e;
+					}
 				}
 				advanceProgress();
 			}
@@ -2329,7 +2434,14 @@ export default class SyncDrivePlugin extends Plugin {
 				try {
 					const remoteEntry = remoteMetadata.files[path];
 					if (remoteEntry?.id) {
-						await this.gdrive.deleteFile(remoteEntry.id);
+						try {
+							await this.gdrive.deleteFile(remoteEntry.id);
+						} catch (e: any) {
+							if (!String(e.message || '').includes('404')) {
+								throw e;
+							}
+							this.debugLog("File to delete already gone (404)", { path, id: remoteEntry.id });
+						}
 						remoteMetadata.files[path].isDeleted = true;
 					}
 				} finally {
@@ -2386,7 +2498,12 @@ export default class SyncDrivePlugin extends Plugin {
 			await this.saveLocalHashCache(nextCache);
 			this.clearDelta();
 
-			new Notice("Sync complete!");
+			if (diff.conflicts.length > 0) {
+				new ConflictResolveModal(this.app, this.getPendingConflicts()).open();
+				new Notice(`Sync complete with ${diff.conflicts.length} conflicts!`);
+			} else {
+				new Notice("Sync complete!");
+			}
 			this.debugLog("Sync complete");
 		} catch (e: any) {
 			new Notice(`Sync failed: ${e.message}`);

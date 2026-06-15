@@ -137,7 +137,19 @@ export class GDriveHelper {
         }
 
         this.debugLog("API response ok", { status: response.status });
-        return response.json;
+        if (response.status === 204 || !response.text || response.text.trim().length === 0) {
+            return null;
+        }
+
+        try {
+            return response.json;
+        } catch (e) {
+            this.debugLog("Failed to parse API response as JSON", {
+                status: response.status,
+                text: response.text?.substring(0, 100)
+            });
+            return null;
+        }
     }
 
     private async requestUrlWithAuth(params: RequestUrlParam, retry = true): Promise<any> {
@@ -391,20 +403,28 @@ export class GDriveHelper {
         existingFileId?: string,
         options?: { ifMatch?: string; mimeType?: string }
     ): Promise<string> {
-        const contentSize = this.getContentSize(content);
-        if (contentSize >= RESUMABLE_UPLOAD_THRESHOLD) {
-            try {
-                return await this.uploadFileResumable(name, content, parentId, existingFileId, options, contentSize);
-            } catch (e: any) {
-                const message = String(e?.message || e || '');
-                if (message.includes('ERR_INVALID_ARGUMENT')) {
-                    this.debugLog("Resumable upload failed, falling back to multipart", { name, error: message });
-                    return await this.uploadFileMultipart(name, content, parentId, existingFileId, options);
+        try {
+            const contentSize = this.getContentSize(content);
+            if (contentSize >= RESUMABLE_UPLOAD_THRESHOLD) {
+                try {
+                    return await this.uploadFileResumable(name, content, parentId, existingFileId, options, contentSize);
+                } catch (e: any) {
+                    const message = String(e?.message || e || '');
+                    if (message.includes('ERR_INVALID_ARGUMENT')) {
+                        this.debugLog("Resumable upload failed, falling back to multipart", { name, error: message });
+                        return await this.uploadFileMultipart(name, content, parentId, existingFileId, options);
+                    }
+                    throw e;
                 }
-                throw e;
             }
+            return await this.uploadFileMultipart(name, content, parentId, existingFileId, options);
+        } catch (e: any) {
+            if (existingFileId && String(e.message || '').includes('404')) {
+                this.debugLog("File to update not found (404), creating as new", { name, existingFileId });
+                return await this.uploadFile(name, content, parentId, undefined, options);
+            }
+            throw e;
         }
-        return await this.uploadFileMultipart(name, content, parentId, existingFileId, options);
     }
 
     private async uploadFileMultipart(
@@ -456,15 +476,15 @@ export class GDriveHelper {
             headers['If-Match'] = options.ifMatch;
         }
 
-        const response = await this.requestUrlWithAuth({
+        const data = await this.apiRequest({
             url: url,
             method: method,
             headers: headers,
             body: body
         });
 
-        this.debugLog("Upload success", response.json.id);
-        return response.json.id;
+        this.debugLog("Upload success", data?.id);
+        return data?.id;
     }
 
     private async uploadFileResumable(
@@ -513,7 +533,7 @@ export class GDriveHelper {
             body = content;
         }
 
-        const uploadResponse = await this.requestUrlWithAuth({
+        const uploadResponse = await this.apiRequest({
             url: uploadUrl,
             method: 'PUT',
             headers: {
@@ -523,7 +543,7 @@ export class GDriveHelper {
             body: body
         });
 
-        const uploadedId = uploadResponse.json?.id || existingFileId || '';
+        const uploadedId = uploadResponse?.id || existingFileId || '';
         this.debugLog("Resumable upload success", uploadedId);
         return uploadedId;
     }

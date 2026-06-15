@@ -66,3 +66,25 @@
     gap: 12px;
     margin-top: 24px;
 }
+
+/* Conflict Resolution 3-Panel Merge View */
+.merge-editor-container .cm-mergeView {
+    height: 100%;
+}
+
+.merge-right .cm-mergeViewEditor:first-child {
+    display: none !important;
+}
+
+/* Ensure the gutter is visible and correctly placed */
+.merge-right .cm-mergeViewEditors {
+    display: flex;
+}
+
+.conflict-merge-container .cm-mergeViewEditors {
+    height: 100%;
+}
+
+.conflict-merge-container .cm-editor {
+    height: 100%;
+}
