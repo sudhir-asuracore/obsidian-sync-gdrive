@@ -57,6 +57,8 @@ const DEFAULT_SETTINGS: SyncDriveSettings = {
 const ROOT_FOLDER_NAME = 'obsidian_notes';
 const METADATA_FILE_NAME = 'metadata.json';
 const VAULT_META_FILE_NAME = 'vaults-meta.json';
+const SOURCE_CODE_URL = 'https://github.com/sudhir-asuracore/obsidian-sync-gdrive';
+const KOFI_SUPPORT_URL = 'https://ko-fi.com/U7U61FUIAB';
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'webp', 'tif', 'tiff', 'heic', 'heif']);
 const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'flac', 'm4a', 'ogg', 'aac', 'opus', 'aiff']);
@@ -2981,7 +2983,42 @@ class SyncDriveSettingTab extends PluginSettingTab {
 		this.plugin.setSyncActionStateListener(null);
 		this.plugin.setSyncProgressListener(null);
 
-		containerEl.createEl('h2', { text: 'Sync Drive Settings' });
+		const headerEl = containerEl.createDiv({ cls: 'sync-drive-settings-header' });
+		headerEl.createEl('h2', { text: 'Sync Drive Settings' });
+
+		const headerLinksEl = headerEl.createDiv({ cls: 'sync-drive-header-links' });
+
+		const sourceLink = headerLinksEl.createEl('a', {
+			cls: 'sync-drive-header-link',
+			href: SOURCE_CODE_URL,
+			text: ' Source'
+		});
+		sourceLink.setAttribute('target', '_blank');
+		sourceLink.setAttribute('rel', 'noopener');
+		sourceLink.setAttribute('title', 'View source code on GitHub');
+		const ghIcon = sourceLink.createSpan({ cls: 'sync-drive-header-link-icon' });
+		setIcon(ghIcon, 'github');
+		sourceLink.prepend(ghIcon);
+		sourceLink.addEventListener('click', (e) => {
+			e.preventDefault();
+			window.open(SOURCE_CODE_URL, '_blank');
+		});
+
+		const kofiLink = headerLinksEl.createEl('a', {
+			cls: 'sync-drive-header-link sync-drive-kofi-header-link',
+			href: KOFI_SUPPORT_URL,
+			text: ' Support on Ko-fi'
+		});
+		kofiLink.setAttribute('target', '_blank');
+		kofiLink.setAttribute('rel', 'noopener');
+		kofiLink.setAttribute('title', 'Support this project on Ko-fi');
+		const kofiIcon = kofiLink.createSpan({ cls: 'sync-drive-header-link-icon' });
+		setIcon(kofiIcon, 'coffee');
+		kofiLink.prepend(kofiIcon);
+		kofiLink.addEventListener('click', (e) => {
+			e.preventDefault();
+			window.open(KOFI_SUPPORT_URL, '_blank');
+		});
 
 		const gateMessage = 'please select or type in a vault name.';
 		const gatedSettings: Setting[] = [];
@@ -3463,5 +3500,33 @@ class SyncDriveSettingTab extends PluginSettingTab {
 			});
 
 		applyVaultGate();
+
+		const footerEl = containerEl.createDiv({ cls: 'sync-drive-settings-footer' });
+		footerEl.createSpan({ text: 'Sync Drive • ', cls: 'sync-drive-footer-text' });
+		const footerSource = footerEl.createEl('a', {
+			href: SOURCE_CODE_URL,
+			text: 'GitHub',
+			cls: 'sync-drive-footer-link'
+		});
+		footerSource.setAttribute('target', '_blank');
+		footerSource.setAttribute('rel', 'noopener');
+		footerSource.addEventListener('click', (e) => {
+			e.preventDefault();
+			window.open(SOURCE_CODE_URL, '_blank');
+		});
+
+		footerEl.createSpan({ text: ' • ', cls: 'sync-drive-footer-text' });
+
+		const footerKofi = footerEl.createEl('a', {
+			href: KOFI_SUPPORT_URL,
+			text: 'Ko-fi Support',
+			cls: 'sync-drive-footer-link'
+		});
+		footerKofi.setAttribute('target', '_blank');
+		footerKofi.setAttribute('rel', 'noopener');
+		footerKofi.addEventListener('click', (e) => {
+			e.preventDefault();
+			window.open(KOFI_SUPPORT_URL, '_blank');
+		});
 	}
 }

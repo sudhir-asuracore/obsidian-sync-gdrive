@@ -2,6 +2,8 @@
 
 Sync Drive keeps your Obsidian vault in Google Drive with optional end-to-end encryption.
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/U7U61FUIAB)
+
 ## Features
 - Two-way sync between a vault and Google Drive
 - Multi-vault support under a single Drive root folder
@@ -123,6 +125,14 @@ npm run bridge
 Build outputs:
 - `main.js` is the bundled plugin entry
 - `dist/sync-drive/` contains `main.js`, `manifest.json`, `styles.css`
+
+## Support
+
+If you find this plugin helpful, consider supporting its development:
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/U7U61FUIAB)
+
+<script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'U7U61FUIAB');kofiwidget2.draw();</script>
 
 ## Contributing
 1. Fork the repo

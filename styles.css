@@ -88,3 +88,85 @@
 .conflict-merge-container .cm-editor {
     height: 100%;
 }
+
+/* Settings Header & Minimalist Navigation Links */
+.sync-drive-settings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 18px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.sync-drive-settings-header h2 {
+    margin: 0;
+}
+
+.sync-drive-header-links {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sync-drive-header-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: var(--radius-s, 4px);
+    font-size: var(--font-ui-smaller, 0.85em);
+    color: var(--text-muted);
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    text-decoration: none !important;
+    cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.sync-drive-header-link:hover {
+    color: var(--text-normal);
+    background-color: var(--background-modifier-hover);
+    border-color: var(--interactive-accent);
+}
+
+.sync-drive-header-link-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.sync-drive-header-link-icon svg {
+    width: 14px;
+    height: 14px;
+}
+
+.sync-drive-kofi-header-link:hover {
+    border-color: #72a4f2;
+    color: #72a4f2;
+}
+
+.sync-drive-settings-footer {
+    margin-top: 32px;
+    padding-top: 16px;
+    border-top: 1px solid var(--background-modifier-border);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--font-ui-smaller, 0.85em);
+    color: var(--text-faint);
+}
+
+.sync-drive-footer-link {
+    color: var(--text-muted);
+    text-decoration: none !important;
+    transition: color 0.15s ease;
+}
+
+.sync-drive-footer-link:hover {
+    color: var(--text-accent);
+    text-decoration: underline !important;
+}
