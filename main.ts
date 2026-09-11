@@ -2048,7 +2048,6 @@ export default class SyncDrivePlugin extends Plugin {
 
 		const scope = [
 			'https://www.googleapis.com/auth/drive.file',
-			'https://www.googleapis.com/auth/drive.metadata.readonly',
 			'openid',
 			'https://www.googleapis.com/auth/userinfo.email',
 			'https://www.googleapis.com/auth/userinfo.profile'
@@ -2121,7 +2120,6 @@ export default class SyncDrivePlugin extends Plugin {
 		const manualRedirectUri = "http://localhost";
 		const scope = [
 			'https://www.googleapis.com/auth/drive.file',
-			'https://www.googleapis.com/auth/drive.metadata.readonly',
 			'openid',
 			'https://www.googleapis.com/auth/userinfo.email',
 			'https://www.googleapis.com/auth/userinfo.profile'
