@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terms of Service - Sync Drive</title>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #24292f;
+            --text-muted: #57606a;
+            --border-color: #d0d7de;
+            --link-color: #0969da;
+            --card-bg: #f6f8fa;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0d1117;
+                --text-color: #c9d1d9;
+                --text-muted: #8b949e;
+                --border-color: #30363d;
+                --link-color: #58a6ff;
+                --card-bg: #161b22;
+            }
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.65;
+            margin: 0;
+            padding: 40px 20px 80px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        header {
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 24px;
+            margin-bottom: 32px;
+        }
+        h1 {
+            margin: 0 0 8px;
+            font-size: 2rem;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+        h2 {
+            margin-top: 32px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 1.35rem;
+        }
+        p, li {
+            font-size: 1rem;
+        }
+        ul {
+            padding-left: 24px;
+        }
+        a {
+            color: var(--link-color);
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        footer {
+            margin-top: 48px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Terms of Service</h1>
+            <div class="subtitle">Last updated: September 11, 2026 &bull; Sync Drive (Obsidian Plugin)</div>
+        </header>
+
+        <section>
+            <h2>1. Agreement to Terms</h2>
+            <p>By installing, activating, or using the <strong>Sync Drive</strong> plugin for Obsidian ("the software"), you agree to be bound by these Terms of Service. If you do not agree to these terms, please do not install or use the software.</p>
+        </section>
+
+        <section>
+            <h2>2. Description of the Service</h2>
+            <p>Sync Drive is an open-source client-side plugin that enables users of the Obsidian desktop and mobile application to synchronize their local notes, vaults, and settings with their own Google Drive storage accounts using official Google Drive APIs.</p>
+        </section>
+
+        <section>
+            <h2>3. Google Services and Third-Party Accounts</h2>
+            <p>Use of Sync Drive requires access to a valid Google account with Google Drive enabled. You are solely responsible for:</p>
+            <ul>
+                <li>Maintaining the confidentiality of your Google account credentials.</li>
+                <li>Complying with <a href="https://policies.google.com/terms" target="_blank" rel="noopener">Google's Terms of Service</a> and <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</li>
+                <li>Managing your Google Drive storage limits and quotas.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>4. Encryption Key and Data Responsibility</h2>
+            <p>If you choose to use the optional client-side AES-256-GCM encryption feature:</p>
+            <ul>
+                <li>Your encryption key/passphrase is stored locally on your device and is never sent to any server.</li>
+                <li><strong>You are solely responsible for backing up and remembering your encryption key.</strong> If you lose or forget your encryption key, your encrypted data cannot be decrypted or recovered by the developer, Obsidian, or Google.</li>
+                <li>We recommend maintaining regular offline backups of your notes.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>5. Intellectual Property and Open Source License</h2>
+            <p>Sync Drive is open-source software distributed under the <strong>MIT License</strong>. You retain full and exclusive ownership of all notes, files, metadata, and content synchronized through the plugin.</p>
+            <p>You may inspect, modify, and contribute to the source code on GitHub in accordance with the MIT License.</p>
+        </section>
+
+        <section>
+            <h2>6. Disclaimer of Warranties</h2>
+            <p>THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.</p>
+            <p>We do not guarantee that the software will be uninterrupted, error-free, or that synchronization conflicts or data transmission failures will never occur.</p>
+        </section>
+
+        <section>
+            <h2>7. Limitation of Liability</h2>
+            <p>To the maximum extent permitted by applicable law, in no event shall the developer, contributors, or copyright holders be liable for any direct, indirect, incidental, special, consequential, or punitive damages, including but not limited to loss of data, loss of profits, device corruption, or service interruption arising from the use or inability to use the software.</p>
+        </section>
+
+        <section>
+            <h2>8. Modifications to Terms</h2>
+            <p>We reserve the right to revise or update these Terms of Service at any time. Any changes will be posted to this page with an updated "Last updated" date. Continued use of the software after changes are published constitutes your acceptance of the new terms.</p>
+        </section>
+
+        <section>
+            <h2>9. Contact Information</h2>
+            <p>For inquiries, support, or questions regarding these Terms of Service, please visit our GitHub repository:</p>
+            <p><a href="https://github.com/sudhir-asuracore/obsidian-sync-gdrive" target="_blank" rel="noopener">https://github.com/sudhir-asuracore/obsidian-sync-gdrive</a></p>
+        </section>
+
+        <footer>
+            <div>&copy; 2026 Sync Drive &bull; Sudhir Babu Nakka</div>
+            <div>
+                <a href="privacy.html">Privacy Policy</a> &bull;
+                <a href="https://github.com/sudhir-asuracore/obsidian-sync-gdrive" target="_blank" rel="noopener">GitHub</a>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>

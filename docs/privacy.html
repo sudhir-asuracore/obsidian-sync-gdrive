@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - Sync Drive</title>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --text-color: #24292f;
+            --text-muted: #57606a;
+            --border-color: #d0d7de;
+            --link-color: #0969da;
+            --card-bg: #f6f8fa;
+            --code-bg: #eff1f3;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0d1117;
+                --text-color: #c9d1d9;
+                --text-muted: #8b949e;
+                --border-color: #30363d;
+                --link-color: #58a6ff;
+                --card-bg: #161b22;
+                --code-bg: #1f242c;
+            }
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.65;
+            margin: 0;
+            padding: 40px 20px 80px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        header {
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 24px;
+            margin-bottom: 32px;
+        }
+        h1 {
+            margin: 0 0 8px;
+            font-size: 2rem;
+        }
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+        h2 {
+            margin-top: 32px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 1.35rem;
+        }
+        h3 {
+            font-size: 1.1rem;
+            margin-top: 20px;
+        }
+        p, li {
+            font-size: 1rem;
+        }
+        ul {
+            padding-left: 24px;
+        }
+        a {
+            color: var(--link-color);
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .highlight-box {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-left: 4px solid var(--link-color);
+            padding: 16px 20px;
+            border-radius: 6px;
+            margin: 24px 0;
+        }
+        footer {
+            margin-top: 48px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Privacy Policy</h1>
+            <div class="subtitle">Last updated: September 11, 2026 &bull; Sync Drive (Obsidian Plugin)</div>
+        </header>
+
+        <section>
+            <h2>1. Introduction</h2>
+            <p><strong>Sync Drive</strong> ("we", "our", or "the plugin") is an open-source community plugin for the Obsidian note-taking application. Sync Drive is designed to synchronize your personal Obsidian vault files with your personal Google Drive account.</p>
+            <p>Your privacy is paramount. Sync Drive operates as a direct client-to-cloud integration without intermediate developer servers, telemetry, or third-party data tracking.</p>
+        </section>
+
+        <section>
+            <h2>2. Information We Access and Process</h2>
+            <p>Sync Drive only accesses the information strictly required to perform synchronization functions requested by you:</p>
+            <ul>
+                <li><strong>Google Account Profile & Email:</strong> We request access to basic profile information (such as your name and email address) via Google OAuth solely to display your logged-in status in the plugin's settings tab.</li>
+                <li><strong>Google Drive Files:</strong> We request Google Drive permissions solely to create, read, update, list, and delete files and folders inside your designated sync folder (by default <code>obsidian_notes/</code>). Sync Drive does not inspect, read, or modify files outside this designated folder.</li>
+                <li><strong>Authentication Tokens:</strong> OAuth 2.0 access tokens and refresh tokens received from Google are stored locally on your device in your Obsidian vault's plugin directory (<code>data.json</code>).</li>
+                <li><strong>Vault Content:</strong> Your Markdown notes, configuration settings, and attachments are processed locally on your device for hashing and synchronization. If client-side encryption is enabled, your notes are encrypted before being uploaded to Google Drive.</li>
+            </ul>
+        </section>
+
+        <section class="highlight-box">
+            <h3 style="margin-top: 0;">3. Google API Services User Data Policy Compliance</h3>
+            <p><strong>Sync Drive's use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API Services User Data Policy</a>, including the Limited Use requirements.</strong></p>
+            <p>Specifically:</p>
+            <ul style="margin-bottom: 0;">
+                <li>We do not transfer or disclose Google user data to any external parties.</li>
+                <li>We do not use Google user data for advertising, marketing, or profiling.</li>
+                <li>We do not use Google user data to train or fine-tune machine learning or artificial intelligence models.</li>
+                <li>Human review of user data is strictly prohibited and technically impossible since we do not operate servers that receive your data.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>4. Data Storage and Transmission Architecture</h2>
+            <p>Sync Drive uses a <strong>zero-server, client-only architecture</strong>:</p>
+            <ul>
+                <li><strong>Direct Transmission:</strong> All network requests for authentication and file operations travel directly between your local Obsidian application and Google's official API servers (<code>https://oauth2.googleapis.com</code> and <code>https://www.googleapis.com</code>) over encrypted HTTPS.</li>
+                <li><strong>No Intermediate Servers:</strong> There are no developer servers, analytics services, telemetry trackers, or third-party databases collecting or routing your data.</li>
+                <li><strong>Local Storage:</strong> All settings, cached file hashes, sync states, and OAuth tokens are stored locally on your device inside your Obsidian vault folder.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>5. Client-Side Encryption</h2>
+            <p>Sync Drive provides optional end-to-end client-side encryption using the industry-standard <strong>AES-256-GCM</strong> cipher with <strong>PBKDF2-HMAC-SHA256</strong> key derivation (100,000 iterations). When enabled:</p>
+            <ul>
+                <li>File contents are encrypted on your device before transmission to Google Drive.</li>
+                <li>Your encryption password/key is stored only on your local device and is never sent to Google, the developer, or any remote server.</li>
+                <li>Neither Google nor the plugin developers have access to your encryption key or decrypted note contents.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>6. User Control, Data Retention, and Revocation</h2>
+            <ul>
+                <li><strong>Disconnecting Account:</strong> You can disconnect your Google account at any time by clicking "Logout" in the Sync Drive settings within Obsidian. This immediately erases your access token and refresh token from your local device.</li>
+                <li><strong>Revoking Access via Google:</strong> You can revoke Sync Drive's access to your Google account at any time via your <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google Account Security Settings</a>.</li>
+                <li><strong>Deleting Remote Data:</strong> All synchronized files in Google Drive remain in your personal Google Drive storage and can be modified or permanently deleted by you through Google Drive at any time.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>7. Security Practices</h2>
+            <p>All source code for Sync Drive is open-source and publicly auditable. All network communications are conducted over Transport Layer Security (TLS/HTTPS). No passwords or unencrypted payloads are transmitted to unauthorized endpoints.</p>
+        </section>
+
+        <section>
+            <h2>8. Changes to this Policy</h2>
+            <p>If we update this Privacy Policy, changes will be published directly to this page and announced in the GitHub repository release notes. Continued use of the plugin following any changes constitutes acceptance of the revised policy.</p>
+        </section>
+
+        <section>
+            <h2>9. Contact and Open Source</h2>
+            <p>Sync Drive is an open-source project maintained by Sudhir Babu Nakka. For questions, privacy inquiries, or security reports, please reach out via GitHub:</p>
+            <p>GitHub Repository: <a href="https://github.com/sudhir-asuracore/obsidian-sync-gdrive" target="_blank" rel="noopener">https://github.com/sudhir-asuracore/obsidian-sync-gdrive</a><br>
+            Issue Tracker: <a href="https://github.com/sudhir-asuracore/obsidian-sync-gdrive/issues" target="_blank" rel="noopener">https://github.com/sudhir-asuracore/obsidian-sync-gdrive/issues</a></p>
+        </section>
+
+        <footer>
+            <div>&copy; 2026 Sync Drive &bull; Sudhir Babu Nakka</div>
+            <div>
+                <a href="terms.html">Terms of Service</a> &bull;
+                <a href="https://github.com/sudhir-asuracore/obsidian-sync-gdrive" target="_blank" rel="noopener">GitHub</a>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>

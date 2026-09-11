@@ -154,3 +154,8 @@ please open an issue to discuss.
 This plugin uses the WebCrypto API for encryption, which is available on both
 desktop and mobile builds of Obsidian. If WebCrypto is not available for any
 reason, encryption features will fail with an explicit error.
+
+## Privacy & Terms
+- [Privacy Policy](PRIVACY.md) &bull; [Hosted Web Version](https://sudhir-asuracore.github.io/obsidian-sync-gdrive/privacy.html)
+- [Terms of Service](TERMS.md) &bull; [Hosted Web Version](https://sudhir-asuracore.github.io/obsidian-sync-gdrive/terms.html)
+
